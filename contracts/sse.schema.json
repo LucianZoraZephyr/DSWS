@@ -11,7 +11,7 @@
   "$defs": {
     "progress": {
       "type": "object",
-      "required": ["type", "step", "status"],
+      "required": ["type", "step", "status", "duration_ms"],
       "additionalProperties": false,
       "properties": {
         "type": { "const": "progress" },
@@ -25,9 +25,27 @@
         "duration_ms": {
           "type": ["number", "null"],
           "minimum": 0,
-          "description": "success / error 时必填；running / skipped 时为 null"
+          "description": "success / error 时必填数字；running / skipped 时必须为 null"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "enum": ["success", "error"] } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "duration_ms": { "type": "number", "minimum": 0 }
+            }
+          },
+          "else": {
+            "properties": {
+              "duration_ms": { "type": "null" }
+            }
+          }
+        }
+      ]
     },
     "result": {
       "type": "object",
@@ -65,7 +83,7 @@
     },
     "error": {
       "type": "object",
-      "required": ["type", "code", "message"],
+      "required": ["type", "code", "message", "step"],
       "additionalProperties": false,
       "properties": {
         "type": { "const": "error" },

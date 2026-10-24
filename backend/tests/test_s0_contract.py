@@ -2,11 +2,12 @@
 S0 契约测试
 
 验收标准（对应 REBUILD-ROADMAP.md 的 `make stage0`）：
-  1. /api/steps 下发 12 个步骤，其中恰好 1 个 conditional
+  1. /api/steps 下发 12 个步骤，其中恰好 1 个 conditional；version 来自 YAML
   2. /api/query 的每一条事件都通过 contracts/sse.schema.json
   3. 非条件步骤：running → success；条件步骤：skipped
   4. 最后一条事件是 result
-  5. 未知事件类型必须被 schema 拒绝（防止前端静默忽略）
+  5. 未知事件类型 / 非法 duration 必须被 schema 拒绝
+  6. 边界：500 字通过、501 字 422、空白 422；CORS 只放行开发源
 """
 
 from __future__ import annotations
@@ -23,9 +24,10 @@ from app.main import app
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = json.loads((ROOT / "contracts" / "sse.schema.json").read_text(encoding="utf-8"))
-STEPS = yaml.safe_load((ROOT / "contracts" / "steps.yaml").read_text(encoding="utf-8"))[
-    "steps"
-]
+STEPS_DOC = yaml.safe_load(
+    (ROOT / "contracts" / "steps.yaml").read_text(encoding="utf-8")
+)
+STEPS = STEPS_DOC["steps"]
 
 client = TestClient(app)
 
@@ -45,10 +47,16 @@ def test_steps_catalog() -> None:
     assert response.status_code == 200
 
     payload = response.json()
-    assert payload["version"] == 1
+    assert payload["version"] == STEPS_DOC["version"]
     assert len(payload["steps"]) == 12
     assert sum(1 for step in payload["steps"] if step.get("conditional")) == 1
     assert [step["id"] for step in payload["steps"]] == [step["id"] for step in STEPS]
+    assert [step["label"] for step in payload["steps"]] == [
+        step["label"] for step in STEPS
+    ]
+    assert [step.get("conditional", False) for step in payload["steps"]] == [
+        step.get("conditional", False) for step in STEPS
+    ]
 
 
 def test_every_event_matches_contract() -> None:
@@ -88,11 +96,107 @@ def test_step_lifecycle() -> None:
     assert events[-1]["data"]["columns"]
 
 
+def test_skipped_only_for_conditional_steps() -> None:
+    events = parse_sse(client.post("/api/query", json={"query": "test"}).text)
+    skipped = {
+        event["step"]
+        for event in events
+        if event["type"] == "progress" and event["status"] == "skipped"
+    }
+    conditional = {step["id"] for step in STEPS if step.get("conditional")}
+    assert skipped == conditional
+
+
 def test_unknown_event_is_rejected() -> None:
     """未知事件必须被契约拒绝——这是旧系统「静默忽略」缺陷的反例。"""
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance={"type": "unknown"}, schema=SCHEMA)
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        # success / error 必须带非负数字
+        {"type": "progress", "step": "run_sql", "status": "success"},
+        {"type": "progress", "step": "run_sql", "status": "success", "duration_ms": None},
+        {"type": "progress", "step": "run_sql", "status": "error", "duration_ms": -1},
+        # running / skipped 必须是 null
+        {"type": "progress", "step": "run_sql", "status": "running", "duration_ms": 12},
+        {"type": "progress", "step": "correct_sql", "status": "skipped", "duration_ms": 0},
+    ],
+)
+def test_bad_duration_is_rejected(event: dict) -> None:
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=event, schema=SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "progress", "step": "run_sql", "status": "success", "duration_ms": 12},
+        {"type": "progress", "step": "run_sql", "status": "error", "duration_ms": 0},
+        {"type": "progress", "step": "run_sql", "status": "running", "duration_ms": None},
+        {
+            "type": "progress",
+            "step": "correct_sql",
+            "status": "skipped",
+            "duration_ms": None,
+        },
+    ],
+)
+def test_good_duration_is_accepted(event: dict) -> None:
+    jsonschema.validate(instance=event, schema=SCHEMA)
+
+
+def test_error_event_requires_step() -> None:
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance={"type": "error", "code": "SQL_REJECTED", "message": "x"},
+            schema=SCHEMA,
+        )
+    jsonschema.validate(
+        instance={
+            "type": "error",
+            "code": "SQL_REJECTED",
+            "message": "x",
+            "step": None,
+        },
+        schema=SCHEMA,
+    )
+
+
 def test_empty_query_is_rejected() -> None:
     assert client.post("/api/query", json={"query": ""}).status_code == 422
+    assert client.post("/api/query", json={"query": "   "}).status_code == 422
+
+
+def test_query_length_boundary() -> None:
+    assert client.post("/api/query", json={"query": "字" * 500}).status_code == 200
+    assert client.post("/api/query", json={"query": "字" * 501}).status_code == 422
+
+
+def test_cors_only_allows_dev_origin() -> None:
+    allowed = client.options(
+        "/api/query",
+        headers={
+            "Origin": "http://127.0.0.1:5273",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert allowed.headers.get("access-control-allow-origin") == "http://127.0.0.1:5273"
+
+    denied = client.options(
+        "/api/query",
+        headers={
+            "Origin": "http://evil.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" not in denied.headers
+
+
+def test_openapi_query_declares_event_stream() -> None:
+    spec = client.get("/openapi.json").json()
+    content = spec["paths"]["/api/query"]["post"]["responses"]["200"]["content"]
+    assert "text/event-stream" in content
+    assert "application/json" not in content

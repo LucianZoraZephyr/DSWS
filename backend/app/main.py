@@ -30,9 +30,11 @@ from pydantic import BaseModel, Field
 REBUILD_ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS_DIR = REBUILD_ROOT / "contracts"
 
-STEPS: list[dict] = yaml.safe_load(
+STEPS_DOC: dict = yaml.safe_load(
     (CONTRACTS_DIR / "steps.yaml").read_text(encoding="utf-8")
-)["steps"]
+)
+STEPS: list[dict] = STEPS_DOC["steps"]
+STEPS_VERSION: int = STEPS_DOC["version"]
 
 _STEP_IDS = [step["id"] for step in STEPS]
 if len(_STEP_IDS) != len(set(_STEP_IDS)):
@@ -55,8 +57,8 @@ app.add_middleware(
         "http://127.0.0.1:5273",
         "http://localhost:5273",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -64,6 +66,27 @@ class QueryRequest(BaseModel):
     """`POST /api/query` 请求体：单轮自然语言问题。"""
 
     query: str = Field(min_length=1, max_length=500)
+
+
+class StepDef(BaseModel):
+    """步骤目录中的一项。"""
+
+    id: str
+    label: str
+    conditional: bool = False
+
+
+class StepsResponse(BaseModel):
+    """`GET /api/steps` 的响应。"""
+
+    version: int
+    steps: list[StepDef]
+
+
+class EventStreamResponse(StreamingResponse):
+    """让 OpenAPI 正确声明 `text/event-stream`，而不是默认的 application/json。"""
+
+    media_type = "text/event-stream"
 
 
 # ---------------------------------------------------------------------------
@@ -76,24 +99,36 @@ def health() -> dict:
     return {"status": "ok", "stage": "S0"}
 
 
-@app.get("/api/steps")
-def get_steps() -> dict:
+@app.get("/api/steps", response_model=StepsResponse)
+def get_steps() -> StepsResponse:
     """
     下发步骤目录。
 
     前端不再硬编码节点：新增/删除节点只改 steps.yaml。
     """
-    return {"version": 1, "steps": STEPS}
+    return StepsResponse(version=STEPS_VERSION, steps=STEPS)
 
 
-@app.post("/api/query")
-async def query(request: QueryRequest) -> StreamingResponse:
+@app.post(
+    "/api/query",
+    response_class=EventStreamResponse,
+    responses={
+        200: {
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                    "example": 'data: {"type":"progress","step":"extract_keywords","status":"running","duration_ms":null}\n\n',
+                }
+            }
+        }
+    },
+)
+async def query(request: QueryRequest) -> EventStreamResponse:
     if not request.query.strip():
         raise HTTPException(status_code=422, detail="query 不能为空")
 
-    return StreamingResponse(
+    return EventStreamResponse(
         _fake_stream(request.query),
-        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
@@ -112,7 +147,7 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-async def _fake_stream(query: str) -> AsyncIterator[str]:
+async def _fake_stream(_query: str) -> AsyncIterator[str]:
     """
     S0 的假流：
 
@@ -121,6 +156,7 @@ async def _fake_stream(query: str) -> AsyncIterator[str]:
       - 最后：      result
 
     这条流的意义不是「像真的」，而是「把契约跑通」。
+    `_query` 在 S0 不参与结果：真实问答从 S3/S4 开始接入。
     """
     for step in STEPS:
         step_id = step["id"]

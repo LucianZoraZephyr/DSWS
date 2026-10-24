@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import Composer from "./components/Composer";
 import ResultTable from "./components/ResultTable";
 import StepRail from "./components/StepRail";
-import { fetchSteps, streamQuery } from "./lib/api";
+import { fetchSteps, streamQuery, ApiError } from "./lib/api";
 import type {
   AgentEvent,
   ErrorEvent,
@@ -11,6 +11,22 @@ import type {
   StepDef,
   StepState,
 } from "./types";
+
+function markRunningAsError(
+  states: Record<string, StepState>,
+  step?: string | null,
+): Record<string, StepState> {
+  const next = { ...states };
+  for (const [id, state] of Object.entries(next)) {
+    if (state.status === "running") {
+      next[id] = { status: "error", duration_ms: null };
+    }
+  }
+  if (step) {
+    next[step] = { status: "error", duration_ms: null };
+  }
+  return next;
+}
 
 export default function App() {
   const [steps, setSteps] = useState<StepDef[]>([]);
@@ -53,7 +69,12 @@ export default function App() {
 
     try {
       await streamQuery(query, (event: AgentEvent) => {
+        if (terminal) return;
+
         if (event.type === "progress") {
+          if (!steps.some((step) => step.id === event.step)) {
+            throw new ApiError("UNKNOWN_STEP", `未知步骤：${event.step}`);
+          }
           setStates((previous) => ({
             ...previous,
             [event.step]: {
@@ -72,12 +93,7 @@ export default function App() {
 
         terminal = true;
         setError(event);
-        if (event.step) {
-          setStates((previous) => ({
-            ...previous,
-            [event.step as string]: { status: "error", duration_ms: null },
-          }));
-        }
+        setStates((previous) => markRunningAsError(previous, event.step));
       });
 
       // 契约要求：流必须以 result 或 error 收尾。
@@ -89,14 +105,16 @@ export default function App() {
           message: "连接已结束，但没有收到结果或错误事件。",
           step: null,
         });
+        setStates((previous) => markRunningAsError(previous));
       }
     } catch (reason: unknown) {
       setError({
         type: "error",
-        code: "NETWORK_ERROR",
+        code: reason instanceof ApiError ? reason.code : "NETWORK_ERROR",
         message: reason instanceof Error ? reason.message : String(reason),
         step: null,
       });
+      setStates((previous) => markRunningAsError(previous));
     } finally {
       setRunning(false);
     }
@@ -188,7 +206,7 @@ export default function App() {
             )}
           </div>
 
-          <Composer disabled={running} onSubmit={ask} />
+          <Composer disabled={running || steps.length === 0} onSubmit={ask} />
         </section>
       </main>
 

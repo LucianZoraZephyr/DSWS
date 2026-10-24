@@ -30,18 +30,29 @@
 三件产物：
 
 1. **`contracts/steps.yaml`** —— 12 个步骤的唯一事实源。
-   前端启动时从 `GET /api/steps` 拉取，**零硬编码**。
+   前端启动时从 `GET /api/steps` 拉取，**渲染层零硬编码**。
    `correct_sql` 标了 `conditional: true`，后端显式发 `skipped`，前端显示「未触发」。
 
 2. **`contracts/sse.schema.json`** —— 只允许三种事件：
    - `progress { step, status, duration_ms }`
    - `result { columns, rows }`
    - `error { code, message, step }`
-   未知事件会被 schema 拒绝（旧系统是静默忽略）。
+   后端 schema + 前端运行时类型守卫**双重拒绝**：未知 type / status / step 一律报错（旧系统是静默忽略）。
 
 3. **假 SSE 流** —— 严格按契约发 24 帧：11 个非条件步 ×（running + success）+ 1 个条件步 skipped + 1 个 result。
 
 **刻意没做**：真实 SQL、LLM、检索、数据库。这些从 S1 开始一层层接。
+
+### 评审修复（S0）
+
+| 问题 | 修复 |
+|---|---|
+| `duration_ms` 没进 required，success 缺失也能过 | schema 加 `required` + `if/then/else`；5 条参数化测试 |
+| 前端 `as AgentEvent` 是纯断言，未知事件渲染空红框 | `parseAgentEvent` 运行时类型守卫；未知 type/status/step 抛 `UNKNOWN_EVENT` / `UNKNOWN_STEP` |
+| 失败/静默结束后 running 永久转圈 | error / `STREAM_INCOMPLETE` / 网络错误三处统一收敛为 error |
+| SSE 解析不支持 CRLF、多行 data、尾帧 | `SseParser` 重写；Vitest 8 条用例 |
+| UI 冒烟用 `text=华北` 命中的是提问气泡 | 对照 `/api/steps` 校验顺序/文案；断言 skipped 身份、结果值、零错误卡；自起临时端口 |
+| OpenAPI 把 SSE 声明成 `application/json` | 显式声明 `text/event-stream` |
 
 ---
 
@@ -62,9 +73,9 @@ make dev-frontend     # http://127.0.0.1:5273
 ### 验收
 
 ```bash
-make install          # 首次
-make stage0           # 契约测试 + 前端构建（不需要浏览器）
-make stage0-ui        # 可选：真实 Chrome 冒烟测试（需两个 dev 服务已启动）
+make install          # 首次（uv sync --frozen + npm ci）
+make stage0           # 后端契约测试 + 前端协议单测 + 构建（不需要浏览器）
+make stage0-ui        # 可选：真实 Chrome 冒烟（自起临时端口 8101/5274，跑完清理）
 ```
 
 ---
@@ -78,11 +89,14 @@ rebuild/
 │   └── sse.schema.json     # 三种 SSE 事件
 ├── backend/
 │   ├── app/main.py         # S0 假流 + /api/steps
-│   └── tests/              # 契约测试（5 条）
+│   └── tests/              # 契约测试（19 条）
 ├── frontend/
 │   ├── src/App.tsx
+│   ├── src/lib/api.ts                # 运行时类型守卫 + SSE 解析器
+│   ├── src/lib/sse.test.ts           # Vitest 协议单测（18 条）
 │   ├── src/components/StepRail.tsx   # 竖向导轨（响应式）
 │   └── tests/s0_smoke.mjs            # 无头 Chrome 冒烟
+├── scripts/stage0-ui.sh    # 自起临时端口跑冒烟，跑完清理
 └── Makefile
 ```
 

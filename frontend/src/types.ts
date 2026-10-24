@@ -1,8 +1,10 @@
 /**
  * 契约类型（手写版）
  *
- * 与 contracts/sse.schema.json 一一对应。
- * S7 会用 schema 自动生成这些类型；S0 先手写，并用后端契约测试保证不漂移。
+ * 与 contracts/sse.schema.json 对应。
+ * S0 尚未自动对账：schema 由后端契约测试校验，TS 类型由 tsc 校验，
+ * 两者的一致性靠下面的 Vitest 用例 + 后端测试共同守住。
+ * S7 会改为从 schema 自动生成类型，并加 diff 检查。
  */
 
 export type ProgressStatus = "running" | "success" | "error" | "skipped";
