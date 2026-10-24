@@ -1,0 +1,49 @@
+# 步骤目录：前后端唯一事实源
+#
+# 规则：
+#   1. 任何节点的新增 / 删除 / 改名，只改这个文件。
+#   2. 前端不再硬编码步骤列表，启动时从 GET /api/steps 拉取。
+#   3. conditional: true 表示该节点可能不执行；后端必须显式发 status: "skipped"，
+#      前端据此显示「未触发」，而不是永远 pending 的灰块。
+#
+# 这对应审计缺陷 D4：旧前端硬编码 12 个节点，correct_sql 永远灰着。
+
+version: 1
+
+steps:
+  - id: extract_keywords
+    label: 抽取关键词
+
+  - id: recall_column
+    label: 召回字段信息
+
+  - id: recall_value
+    label: 召回字段取值
+
+  - id: recall_metric
+    label: 召回指标信息
+
+  - id: merge_retrieved_info
+    label: 合并召回信息
+
+  - id: filter_table
+    label: 过滤表信息
+
+  - id: filter_metric
+    label: 过滤指标信息
+
+  - id: add_extra_context
+    label: 添加额外上下文
+
+  - id: generate_sql
+    label: 生成SQL
+
+  - id: validate_sql
+    label: 校验SQL
+
+  - id: correct_sql
+    label: 校正SQL
+    conditional: true
+
+  - id: run_sql
+    label: 执行SQL

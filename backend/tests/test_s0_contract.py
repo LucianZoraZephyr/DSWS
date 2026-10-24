@@ -1,0 +1,98 @@
+"""
+S0 契约测试
+
+验收标准（对应 REBUILD-ROADMAP.md 的 `make stage0`）：
+  1. /api/steps 下发 12 个步骤，其中恰好 1 个 conditional
+  2. /api/query 的每一条事件都通过 contracts/sse.schema.json
+  3. 非条件步骤：running → success；条件步骤：skipped
+  4. 最后一条事件是 result
+  5. 未知事件类型必须被 schema 拒绝（防止前端静默忽略）
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import jsonschema
+import pytest
+import yaml
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+ROOT = Path(__file__).resolve().parents[2]
+SCHEMA = json.loads((ROOT / "contracts" / "sse.schema.json").read_text(encoding="utf-8"))
+STEPS = yaml.safe_load((ROOT / "contracts" / "steps.yaml").read_text(encoding="utf-8"))[
+    "steps"
+]
+
+client = TestClient(app)
+
+
+def parse_sse(body: str) -> list[dict]:
+    """把 SSE 响应体解析成事件列表。"""
+    events: list[dict] = []
+    for block in body.split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[len("data:") :].strip()))
+    return events
+
+
+def test_steps_catalog() -> None:
+    response = client.get("/api/steps")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["version"] == 1
+    assert len(payload["steps"]) == 12
+    assert sum(1 for step in payload["steps"] if step.get("conditional")) == 1
+    assert [step["id"] for step in payload["steps"]] == [step["id"] for step in STEPS]
+
+
+def test_every_event_matches_contract() -> None:
+    response = client.post("/api/query", json={"query": "华北地区销售额"})
+    assert response.status_code == 200
+
+    events = parse_sse(response.text)
+    assert events, "没有收到任何 SSE 事件"
+
+    for event in events:
+        jsonschema.validate(instance=event, schema=SCHEMA)
+
+    known_ids = {step["id"] for step in STEPS}
+    for event in events:
+        if event["type"] == "progress":
+            assert event["step"] in known_ids
+
+
+def test_step_lifecycle() -> None:
+    events = parse_sse(client.post("/api/query", json={"query": "test"}).text)
+    progress = [event for event in events if event["type"] == "progress"]
+
+    by_step: dict[str, list[dict]] = {}
+    for event in progress:
+        by_step.setdefault(event["step"], []).append(event)
+
+    for step in STEPS:
+        step_events = by_step[step["id"]]
+        if step.get("conditional"):
+            assert [event["status"] for event in step_events] == ["skipped"]
+        else:
+            assert [event["status"] for event in step_events] == ["running", "success"]
+            assert step_events[-1]["duration_ms"] is not None
+            assert step_events[-1]["duration_ms"] >= 0
+
+    assert events[-1]["type"] == "result"
+    assert events[-1]["data"]["columns"]
+
+
+def test_unknown_event_is_rejected() -> None:
+    """未知事件必须被契约拒绝——这是旧系统「静默忽略」缺陷的反例。"""
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance={"type": "unknown"}, schema=SCHEMA)
+
+
+def test_empty_query_is_rejected() -> None:
+    assert client.post("/api/query", json={"query": ""}).status_code == 422

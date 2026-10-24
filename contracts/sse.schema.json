@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shopkeeper.local/contracts/sse.schema.json",
+  "title": "问数 SSE 事件",
+  "description": "后端每条形如 `data: <json>\\n\\n`。前端只认这三种事件，未知事件必须报错而不是静默忽略。",
+  "oneOf": [
+    { "$ref": "#/$defs/progress" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "progress": {
+      "type": "object",
+      "required": ["type", "step", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "progress" },
+        "step": {
+          "type": "string",
+          "description": "必须是 contracts/steps.yaml 里声明过的 step id"
+        },
+        "status": {
+          "enum": ["running", "success", "error", "skipped"]
+        },
+        "duration_ms": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "success / error 时必填；running / skipped 时为 null"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["type", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "result" },
+        "data": {
+          "type": "object",
+          "required": ["columns", "rows"],
+          "additionalProperties": false,
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "type": { "enum": ["string", "number", "boolean", "null", "date"] }
+                }
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": { "type": ["string", "number", "boolean", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["type", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "error" },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "description": "机器可判定的错误码，例如 SQL_REJECTED / LLM_REFUSAL / TIMEOUT"
+        },
+        "message": { "type": "string" },
+        "step": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
