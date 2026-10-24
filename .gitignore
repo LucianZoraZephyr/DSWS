@@ -11,3 +11,6 @@ frontend/dist/
 # 本地
 .DS_Store
 *.log
+
+# 这个 config.py 是 S2 的构建配置模块，不是本地密钥
+!backend/app/build/config.py

@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2
 
 install:
 	cd backend && uv sync --frozen
@@ -13,7 +13,7 @@ dev-frontend:
 # S0 硬验收：契约测试 + 前端协议单测 + 类型检查/构建（不需要浏览器）
 stage0:
 	@echo "== S0 · 后端契约测试 =="
-	cd backend && uv run pytest -q
+	cd backend && uv run pytest -q tests/test_s0_contract.py
 	@echo "== S0 · 前端 SSE 协议单测 =="
 	cd frontend && npm run test
 	@echo "== S0 · 前端类型检查 + 构建 =="
@@ -31,5 +31,20 @@ stage1:
 	@echo "== S1 · 负向夹具（必须红） =="
 	cd backend && uv run python -m app.schema_contract --expect-legacy-red
 	@echo "== S1 · 后端测试（S0 + S1） =="
-	cd backend && uv run pytest -q
+	cd backend && uv run pytest -q tests/test_s0_contract.py tests/test_s1_schema_contract.py
 	@echo "S1 PASS"
+
+# S2 硬验收：dry-run 计划 → --fresh 重建 → --verify 对账 → 第二次构建零写入
+# 前置：MySQL/ES/Qdrant 已启动（旧系统 docker compose）；只操作 *_rebuild 目标。
+stage2:
+	@echo "== S2 · dry-run（不连接存储） =="
+	cd backend && uv run python -m app.build_meta_knowledge --dry-run
+	@echo "== S2 · --fresh 重建 rebuild 目标 =="
+	cd backend && uv run python -m app.build_meta_knowledge --fresh
+	@echo "== S2 · --verify 三存储对账 =="
+	cd backend && uv run python -m app.build_meta_knowledge --verify
+	@echo "== S2 · 第二次构建必须零写入 =="
+	cd backend && uv run python -m app.build_meta_knowledge --assert-idempotent
+	@echo "== S2 · 后端测试（S0 + S1 + S2） =="
+	cd backend && uv run pytest -q
+	@echo "S2 PASS"
