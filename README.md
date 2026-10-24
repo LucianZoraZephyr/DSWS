@@ -12,7 +12,7 @@
 | 阶段 | 状态 | 验收 |
 |---|---|---|
 | **S0 骨架** | ✅ 完成 | `make stage0` |
-| S1 Schema 契约 | ⬜ 待做 | `make stage1` |
+| **S1 Schema 契约** | ✅ 完成 | `make stage1` |
 | S2 元知识构建 | ⬜ 待做 | `make stage2` |
 | S3 检索 | ⬜ 待做 | `make stage3` |
 | S4 生成 SQL | ⬜ 待做 | `make stage4` |
@@ -56,6 +56,80 @@
 
 ---
 
+## S1 做了什么
+
+**一句话**：把「表结构」变成可校验的契约，并让旧系统的三处口径矛盾**持续变红**。
+
+DDL 只能说明「有哪些列」，说不清三件事：
+
+| DDL 表达不了 | 契约字段 | 本项目的例子 |
+|---|---|---|
+| 一行代表什么 | `grain` | `fact_order` 一行一单；`dim_region` 只到省，**没有 city 列** |
+| 度量怎么算 | `measures` | `order_quantity` 是件数，**不是订单数**；`order_amount` 是整单金额，**不是单价** |
+| 数据可用到哪 | `value_domain` | `date_id ∈ [20250101, 20250331]`；品牌枚举 15 个 |
+
+四件产物：
+
+1. **`contracts/schema.contract.yaml`** —— 5 张表 / 24 列的语义契约。
+   每列声明 `role`、`value_domain`、`aliases`；每表声明 `grain`、`foreign_keys`、`measures`；
+   每个指标声明 `formula`、`relevant_columns`、`expected_value`。
+2. **`backend/app/schema_contract.py`** —— 检查器。
+   解析 DDL → 装入内存 SQLite → 校验结构、外键、值域、指标公式与真实值；
+   同时把旧系统夹具当作**负向用例**，必须检出 8 个已知缺陷。
+   > 路线图写的交付物是 `docs/schema_contract.py`；实际放在 `backend/app/`，
+   > 这样 pytest 可以直接 import，CLI 仍是 `python -m app.schema_contract`。
+3. **`docs/SCHEMA-CONTRACT.md`** —— 由契约自动生成的人读版，`--check` 会检查它是否过期。
+4. **`fixtures/`** —— 冻结的 `dw.sql`（115 单真实数据）、旧 `meta_config.yaml`、旧功能清单。
+   负向夹具是**冻结副本**，所以单独 clone `rebuild/` 也能自洽运行。
+
+### 指标口径（唯一事实源）
+
+| 指标 | 公式 | 值 |
+|---|---|---:|
+| GMV | `SUM(order_amount)` | 279159.5 |
+| AOV | `SUM(order_amount) / COUNT(DISTINCT order_id)` | **2427.47** |
+| 订单量 | `COUNT(DISTINCT order_id)` | 115 |
+| 销量 | `SUM(order_quantity)` | 622 |
+| 平均件单价 | `SUM(order_amount) / SUM(order_quantity)` | 448.81 |
+| 平均每单件数 | `SUM(order_quantity) / COUNT(DISTINCT order_id)` | 5.41 |
+
+同一个 AOV 在旧系统里能算出三种结果：
+
+| 算法 | 值 | 它其实是什么 |
+|---|---:|---|
+| `SUM(amount) / COUNT(DISTINCT order_id)` | **2427.47** | ✅ AOV |
+| `SUM(amount) / SUM(quantity)` | 448.81 | ❌ 平均件单价 |
+| `SUM(quantity) / COUNT(DISTINCT order_id)` | 5.41 | ❌ 平均每单件数 |
+
+### 红 / 绿演示
+
+```bash
+cd backend
+
+# 当前冻结夹具：预期红（退出码 1）；按契约修复后同一命令退出码 0
+uv run python -m app.schema_contract --check-legacy
+# RED: 旧系统夹具检出 14 条问题
+#   AOV_THREE_WAY / AOV_COLUMN_MISMATCH / AOV_ALIAS_MISMATCH
+#   CITY_GRAIN_UNDECLARED / ORDER_COUNT_UNDEFINED / ALIAS_COLLISION
+#   FEATURE_LIST_TABLE_DRIFT / FEATURE_LIST_ROW_DRIFT
+
+# 新契约：必须绿（退出码 0）
+uv run python -m app.schema_contract --check
+# PASS: 5 张表 / 24 列 / 115 行 / GMV=279159.5 / 销量=622
+# PASS: 旧系统 14 条问题 / 8 个代码（预期红）
+# PASS: docs/SCHEMA-CONTRACT.md 与契约一致
+```
+
+`--check` 不是「忽略旧系统」，而是把「旧系统必须红」当成断言：
+少一个代码，或者旧夹具意外变绿，`make stage1` 就失败。
+
+### 为什么 S1 仍然不装 MySQL
+
+`fixtures/dw.sql` 直接装进内存 `sqlite3`：不需要 MySQL、Docker、`sudo`，也不需要 LLM。
+检查器本身只依赖标准库 + PyYAML；首次 `make install` 仍需联网装依赖，之后即可离线复现。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -74,8 +148,9 @@ make dev-frontend     # http://127.0.0.1:5273
 
 ```bash
 make install          # 首次（uv sync --frozen + npm ci）
-make stage0           # 后端契约测试 + 前端协议单测 + 构建（不需要浏览器）
+make stage0           # S0：后端契约测试 + 前端协议单测 + 构建（不需要浏览器）
 make stage0-ui        # 可选：真实 Chrome 冒烟（自起临时端口 8101/5274，跑完清理）
+make stage1           # S1：契约绿 + 负向夹具红 + 后端全部测试（不需要 MySQL/Docker）
 ```
 
 ---
@@ -86,10 +161,18 @@ make stage0-ui        # 可选：真实 Chrome 冒烟（自起临时端口 8101/
 rebuild/
 ├── contracts/              # 契约（前后端唯一事实源）
 │   ├── steps.yaml          # 12 个步骤 + conditional 标记
-│   └── sse.schema.json     # 三种 SSE 事件
+│   ├── sse.schema.json     # 三种 SSE 事件
+│   └── schema.contract.yaml # S1：5 表 / 24 列 / 6 指标的语义契约
+├── fixtures/               # S1 冻结数据与负向夹具（不依赖旧项目）
+│   ├── dw.sql              # 物理 DDL + 115 单真实数据
+│   └── legacy/             # 旧 meta_config.yaml + 功能清单（必须红）
+├── docs/
+│   ├── SCHEMA-CONTRACT.md  # 由契约自动生成（--write-doc）
+│   └── screenshots/
 ├── backend/
 │   ├── app/main.py         # S0 假流 + /api/steps
-│   └── tests/              # 契约测试（19 条）
+│   ├── app/schema_contract.py # S1 检查器 + 文档生成器 + CLI
+│   └── tests/              # S0 19 条 + S1 40 条
 ├── frontend/
 │   ├── src/App.tsx
 │   ├── src/lib/api.ts                # 运行时类型守卫 + SSE 解析器

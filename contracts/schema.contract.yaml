@@ -1,0 +1,399 @@
+# Schema 契约：数仓的唯一事实源
+#
+# 这个文件补的是 DDL 表达不了的三样东西：
+#   1. grain      —— 一行代表什么（订单？省？天？）
+#   2. measures   —— 度量口径（件数 ≠ 订单数；整单金额 ≠ 单价）
+#   3. value_domain —— 数据可用范围（时间只到 2025-03-31；枚举全集）
+#
+# 校验：cd backend && uv run python -m app.schema_contract --check
+# 生成：cd backend && uv run python -m app.schema_contract --write-doc
+#
+# 旧系统的 conf/meta_config.yaml 是负向夹具，不是事实源：
+#   fixtures/legacy/meta_config.yaml
+# 它必须让 --check-legacy 变红（AOV 三义 / 无 city / order_quantity 口径）。
+
+version: 1
+
+dataset:
+  name: dw
+  expected_tables: 5
+  expected_fact_rows: 115
+  date_range: [20250101, 20250331]
+  total_amount: 279159.5
+  total_quantity: 622
+  note: "数据只覆盖 2025 Q1（90 天）；越界查询必须显式提示，不能静默返回空。"
+
+tables:
+  - name: dim_region
+    role: dim
+    grain: "一行一个 region_id（省级行政区）；region_name 是省的分组，不是唯一键；本表无 city 列。"
+    description: "地区维度表。粒度只到省/大区，没有城市粒度。"
+    primary_key: region_id
+    columns:
+      - name: region_id
+        type: VARCHAR(20)
+        role: primary_key
+        nullable: false
+        description: "地区唯一标识。"
+        aliases: [地区ID, 区域ID]
+        value_domain:
+          kind: enum
+          values: [R001, R002, R003, R004, R005, R006]
+
+      - name: province
+        type: VARCHAR(50)
+        role: dimension
+        nullable: true
+        description: "订单所属的省级行政区；只到省，无城市粒度。用户问『城市』时按省回答，别名必须体现真实粒度。"
+        aliases: [省份, 省, 所在省份]
+        value_domain:
+          kind: enum
+          values: [广东省, 浙江省, 四川省, 北京市, 上海市, 湖北省]
+
+      - name: region_name
+        type: VARCHAR(50)
+        role: dimension
+        nullable: true
+        description: "大区名称（省的上级分组，不是唯一键）。"
+        aliases: [地区, 区域, 大区]
+        value_domain:
+          kind: enum
+          values: [华南, 华东, 西南, 华北, 华中]
+
+      - name: country
+        type: VARCHAR(50)
+        role: dimension
+        nullable: true
+        description: "国家名称。"
+        aliases: [国家, 国家名称]
+        value_domain:
+          kind: enum
+          values: [中国]
+
+    foreign_keys: []
+    measures: []
+
+  - name: dim_customer
+    role: dim
+    grain: "一行一个 customer_id。"
+    description: "客户维度表。"
+    primary_key: customer_id
+    columns:
+      - name: customer_id
+        type: VARCHAR(20)
+        role: primary_key
+        nullable: false
+        description: "客户唯一标识。"
+        aliases: [客户ID, 用户ID]
+        value_domain:
+          kind: id
+          pattern: '^C\d{3}$'
+
+      - name: customer_name
+        type: VARCHAR(50)
+        role: dimension
+        nullable: true
+        description: "客户名称。"
+        aliases: [客户名称, 用户名称]
+        value_domain:
+          kind: open
+
+      - name: gender
+        type: VARCHAR(10)
+        role: dimension
+        nullable: true
+        description: "客户性别。"
+        aliases: [性别]
+        value_domain:
+          kind: enum
+          values: [男, 女]
+
+      - name: member_level
+        type: VARCHAR(20)
+        role: dimension
+        nullable: true
+        description: "客户会员等级。"
+        aliases: [会员等级, 用户等级]
+        value_domain:
+          kind: enum
+          values: [黄金, 白银, 青铜, 铂金]
+
+    foreign_keys: []
+    measures: []
+
+  - name: dim_product
+    role: dim
+    grain: "一行一个 product_id；本表无 price 列。"
+    description: "商品维度表。"
+    primary_key: product_id
+    columns:
+      - name: product_id
+        type: VARCHAR(20)
+        role: primary_key
+        nullable: false
+        description: "商品唯一标识。"
+        aliases: [商品ID, 产品ID]
+        value_domain:
+          kind: id
+          pattern: '^P\d{3}$'
+
+      - name: product_name
+        type: VARCHAR(200)
+        role: dimension
+        nullable: true
+        description: "商品名称。"
+        aliases: [商品名称, 产品名称]
+        value_domain:
+          kind: open
+
+      - name: category
+        type: VARCHAR(50)
+        role: dimension
+        nullable: true
+        description: "商品所属品类。"
+        aliases: [商品类别, 品类, 分类]
+        value_domain:
+          kind: enum
+          values: [手机数码, 家用电器, 鞋靴, 服饰, 食品饮料, 休闲零食]
+
+      - name: brand
+        type: VARCHAR(50)
+        role: dimension
+        nullable: true
+        description: "商品品牌名称。"
+        aliases: [品牌, 品牌名称]
+        value_domain:
+          kind: enum
+          values: [苹果, 三星, 华为, 戴森, 美的, 耐克, 阿迪达斯, 优衣库, 李维斯, 雀巢, 蒙牛, 乐事, 奥利奥, 亚马逊, "Instant Pot"]
+
+    foreign_keys: []
+    measures: []
+
+  - name: dim_date
+    role: dim
+    grain: "一行一个 date_id（一天）。"
+    description: "时间维度表；数据只覆盖 2025 Q1。"
+    primary_key: date_id
+    columns:
+      - name: date_id
+        type: INT
+        role: primary_key
+        nullable: false
+        description: "日期唯一标识，格式 yyyyMMdd。"
+        aliases: [日期ID, 日期]
+        value_domain:
+          kind: range
+          min: 20250101
+          max: 20250331
+
+      - name: year
+        type: INT
+        role: dimension
+        nullable: true
+        description: "年份。"
+        aliases: [年, 年份]
+        value_domain:
+          kind: enum
+          values: [2025]
+
+      - name: quarter
+        type: VARCHAR(2)
+        role: dimension
+        nullable: true
+        description: "自然季度，取值形如 Q1（带 Q 前缀字符串）。"
+        aliases: [季度]
+        value_domain:
+          kind: enum
+          values: [Q1]
+
+      - name: month
+        type: INT
+        role: dimension
+        nullable: true
+        description: "月份，1–12 的数字，不是月份名；本数据集只有 1–3。"
+        aliases: [月, 月份]
+        value_domain:
+          kind: range
+          min: 1
+          max: 3
+
+      - name: day
+        type: INT
+        role: dimension
+        nullable: true
+        description: "日，1–31 的数字。"
+        aliases: [日, 天]
+        value_domain:
+          kind: range
+          min: 1
+          max: 31
+
+    foreign_keys: []
+    measures: []
+
+  - name: fact_order
+    role: fact
+    grain: "一行一个 order_id（一单）；order_quantity 是单内件数，order_amount 是整单金额。"
+    description: "订单事实表；一行一单。"
+    primary_key: order_id
+    columns:
+      - name: order_id
+        type: VARCHAR(30)
+        role: primary_key
+        nullable: false
+        description: "订单唯一标识；一行一单，订单量用 COUNT(DISTINCT order_id)。"
+        aliases: [订单ID, 订单编号]
+        value_domain:
+          kind: id
+          pattern: '^ORD\d{11}$'
+
+      - name: customer_id
+        type: VARCHAR(20)
+        role: foreign_key
+        nullable: true
+        description: "关联客户维度的外键。"
+        aliases: [客户外键, 关联客户ID]
+        value_domain:
+          kind: foreign_key
+
+      - name: product_id
+        type: VARCHAR(20)
+        role: foreign_key
+        nullable: true
+        description: "关联商品维度的外键。"
+        aliases: [商品外键, 关联商品ID]
+        value_domain:
+          kind: foreign_key
+
+      - name: date_id
+        type: INT
+        role: foreign_key
+        nullable: true
+        description: "= dim_date.date_id，格式 yyyyMMdd 整数；标准过滤写法 date_id BETWEEN yyyyMMdd AND yyyyMMdd。"
+        aliases: [日期外键, 关联日期ID]
+        value_domain:
+          kind: foreign_key
+          format: yyyyMMdd
+          range: [20250101, 20250331]
+
+      - name: region_id
+        type: VARCHAR(20)
+        role: foreign_key
+        nullable: true
+        description: "关联地区维度的外键。"
+        aliases: [地区外键, 关联地区ID]
+        value_domain:
+          kind: foreign_key
+
+      - name: order_quantity
+        type: INT
+        role: measure
+        nullable: true
+        description: "订单中商品的购买数量（件数），不是订单数。"
+        aliases: [购买数量, 件数]
+        value_domain:
+          kind: range
+          min: 1
+          max: 30
+
+      - name: order_amount
+        type: FLOAT
+        role: measure
+        nullable: true
+        description: "整单成交金额（已含件数），不是单价；本库无退款/运费列。"
+        # 不把「销售额」放在列别名上：它是 GMV 指标别名，列级与指标级共用一套别名空间。
+        aliases: [订单金额, 收入, 成交金额]
+        value_domain:
+          kind: range
+          min: 30.0
+          max: 9499.0
+
+    foreign_keys:
+      - column: customer_id
+        references: dim_customer.customer_id
+      - column: product_id
+        references: dim_product.product_id
+      - column: date_id
+        references: dim_date.date_id
+      - column: region_id
+        references: dim_region.region_id
+
+    measures:
+      - column: order_id
+        aggregation: count_distinct
+        unit: 单
+        description: "一行一单；COUNT(DISTINCT order_id) 得订单量。"
+      - column: order_quantity
+        aggregation: additive
+        unit: 件
+        description: "件数，不是订单数；SUM 得销量。"
+      - column: order_amount
+        aggregation: additive
+        unit: 元
+        description: "整单金额（已含件数），不是单价；本库无退款/运费列；SUM 得 GMV。"
+
+metrics:
+  - name: GMV
+    label: 成交总额
+    description: "所有订单的整单成交金额之和。"
+    formula: "SUM(fact_order.order_amount)"
+    relevant_columns: [fact_order.order_amount]
+    aliases: [销售额, 成交总额, 订单总额]
+    aggregation: additive
+    expected_value: 279159.5
+    grain: 订单
+
+  - name: AOV
+    label: 平均订单金额
+    description: "平均每单的成交金额；= 成交总额 / 订单量。"
+    formula: "SUM(fact_order.order_amount) / COUNT(DISTINCT fact_order.order_id)"
+    relevant_columns: [fact_order.order_amount, fact_order.order_id]
+    aliases: [平均订单金额, 客单价]
+    aggregation: non_additive
+    expected_value: 2427.47
+    grain: 订单
+    rejected_values:
+      - value: 448.81
+        meaning: "平均件单价 = SUM(order_amount) / SUM(order_quantity)"
+      - value: 5.41
+        meaning: "平均每单件数 = SUM(order_quantity) / COUNT(DISTINCT order_id)"
+
+  - name: 订单量
+    label: 订单量
+    description: "订单数；一行一单，COUNT(DISTINCT order_id)。"
+    formula: "COUNT(DISTINCT fact_order.order_id)"
+    relevant_columns: [fact_order.order_id]
+    aliases: [订单量, 订单数]
+    aggregation: non_additive
+    expected_value: 115
+    grain: 订单
+
+  - name: 销量
+    label: 销量
+    description: "商品件数之和；不是订单数。"
+    formula: "SUM(fact_order.order_quantity)"
+    relevant_columns: [fact_order.order_quantity]
+    aliases: [销量, 销售件数]
+    aggregation: additive
+    expected_value: 622
+    grain: 订单
+
+  - name: 平均件单价
+    label: 平均件单价
+    description: "每件商品的平均成交金额（混合均价，不是目录单价；P008 单价不自洽）。"
+    formula: "SUM(fact_order.order_amount) / SUM(fact_order.order_quantity)"
+    relevant_columns: [fact_order.order_amount, fact_order.order_quantity]
+    aliases: [平均单价, 件单价]
+    aggregation: non_additive
+    expected_value: 448.81
+    grain: 件
+
+  - name: 平均每单件数
+    label: 平均每单件数
+    description: "平均每单包含的商品件数。"
+    formula: "SUM(fact_order.order_quantity) / COUNT(DISTINCT fact_order.order_id)"
+    relevant_columns: [fact_order.order_quantity, fact_order.order_id]
+    aliases: [平均每单件数, 每单件数]
+    aggregation: non_additive
+    expected_value: 5.41
+    grain: 订单

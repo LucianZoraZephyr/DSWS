@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1
 
 install:
 	cd backend && uv sync --frozen
@@ -23,3 +23,13 @@ stage0:
 # 可选：真实 Chrome 冒烟（自起临时端口 8101/5274，跑完清理）
 stage0-ui:
 	./scripts/stage0-ui.sh
+
+# S1 硬验收：契约 ↔ DDL/数据全绿；旧系统负向夹具必须红；文档必须新鲜
+stage1:
+	@echo "== S1 · 契约 ↔ DDL/数据 =="
+	cd backend && uv run python -m app.schema_contract --check
+	@echo "== S1 · 负向夹具（必须红） =="
+	cd backend && uv run python -m app.schema_contract --expect-legacy-red
+	@echo "== S1 · 后端测试（S0 + S1） =="
+	cd backend && uv run pytest -q
+	@echo "S1 PASS"
