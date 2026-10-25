@@ -14,7 +14,7 @@
 | **S0 骨架** | ✅ 完成 | `make stage0` |
 | **S1 Schema 契约** | ✅ 完成 | `make stage1` |
 | **S2 元知识构建** | ✅ 完成 | `make stage2` |
-| S3 检索 | ⬜ 待做 | `make stage3` |
+| **S3 检索** | ✅ 完成 | `make stage3` |
 | S4 生成 SQL | ⬜ 待做 | `make stage4` |
 | S5 安全边界 | ⬜ 待做 | `make stage5` |
 | S6 失败通道 | ⬜ 待做 | `make stage6` |
@@ -253,6 +253,99 @@ uv run python -m app.build_meta_knowledge --assert-idempotent # 第二次必须 
 
 ---
 
+## S3 做了什么
+
+**一句话**：不接 LLM，先用**确定性关键词 + 三存储批量召回**，把问题收窄成
+「表 / 字段 / 指标 / 真实值 / 额外上下文」，并输出一份可逐字节复现的 YAML。
+
+```
+query
+  -> extract_keywords
+  -> recall_column / recall_value / recall_metric   （批量，一次往返）
+  -> merge_retrieved_info                           （一次 Meta 快照）
+  -> filter_table -> filter_metric                  （确定性裁剪）
+  -> add_extra_context                              （日期 / 季度 / 数据集 / MySQL 版本）
+  -> RecallState -> stable YAML
+```
+
+### 关键词不是「分词一下」
+
+没有 jieba、没有 LLM，只有三层确定性规则：
+
+1. **契约词典**：表名、列名、列别名、指标 name/label/alias、契约声明的枚举值。
+   「销售额 → order_amount」这类映射由 `schema.contract.yaml` 给出，不靠模型猜。
+2. **日期模式**：`2025 年 1 月`、`2025Q1`、`2025-01`、`20250101` 等正则识别，
+   同时产生 `dim_date.year / month / quarter` 的提示。
+3. **完整 query 兜底**：契约里没有的客户名/商品名，原文仍会进入检索。
+
+单字别名（如 `省`）只作为字段提示，不直接当 ES 关键词；ES 兜底查询用
+完整短语 + 确定性中文 2-gram，并固定 `analyzer: keyword`，避免 IK 把
+`省`、`1` 这类单字放大成噪声。
+
+### 往返次数是硬约束，不是「尽量批量」
+
+每道题只允许：
+
+| 请求 | 次数 | 说明 |
+|---|---:|---|
+| ES `_msearch` | 1（重试时最多 2） | 所有关键词一次多查询 |
+| Qdrant column `search/batch` | 1 | 一个批次搜完整列 collection |
+| Qdrant metric `search/batch` | 1 | 一个批次搜完整指标 collection |
+| Meta MySQL | 5 条 SQL | 4 张表 + `SELECT VERSION()`，同一连接 |
+
+黄金集测试会断言这些计数，防止以后悄悄退化成逐候选 N+1。
+
+### 候选合并与过滤
+
+- Qdrant 多关键词结果按 payload `id` 去重，取最高向量分；
+- 再用契约 name/alias/value 做**词法补偿分**——hash 向量只认字面重叠，
+  没有这层补偿，同义改写会漏召；
+- 最终字段保留线：词法分 ≥ `0.5`，或向量分 ≥ `0.72`，或命中真实值；
+- `filter_table` 保留有直接证据的表，以及 join 路径上的主外键；
+- `filter_metric` 只保留有词法证据的指标，再按 `relevant_columns` 补依赖列，
+  最后重新裁掉不需要的 join 键；
+- 所有输出按契约顺序或 `(-score, id)` 排序，不依赖 `set` 迭代顺序。
+
+### YAML 是给 LLM 的上下文，不是调试 dump
+
+- 契约字段全部保留：`name / type / role / description / aliases / value_domain /
+  grain / formula / expected_value / relevant_columns / rejected_values`；
+- Meta 的 `examples` 是 S2 截断后的前 10 条，因此每个字段显式写
+  `examples_truncated: true` / `examples_limit: 10`，根节点再重复一次
+  `examples_policy`；
+- 完整命中值放在 `matched_values`，不把 examples 伪装成全集；
+- `retrieval` 段记录往返次数、候选数、过滤前后计数，方便定位召回退化；
+- CLI 的 YAML 只走 stdout，统计只走 stderr，同一输入逐字节稳定。
+
+### 黄金集
+
+`backend/tests/recall/golden.yaml` 固定 20 道题，覆盖单表/多表、指标、
+真实值过滤、日期、季度、join 键与「无指标」问法。每题断言：
+
+- 期望的表 / 字段 / 指标 / 真实值全部命中；
+- 输出规模有上限、precision 有下限（防止「全召回」蒙混过关）；
+- ES / Qdrant / Meta 往返次数符合上表。
+
+当前 **20/20 通过**；集成测试默认跳过，只有 `REBUILD_INTEGRATION=1` 才连真实服务。
+
+### 命令
+
+```bash
+make stage3
+
+# 或者逐步看
+cd backend
+REBUILD_INTEGRATION=1 uv run pytest -q tests/recall   # 37 条：黄金集 + 往返 + 单测
+uv run python -m app.scripts.recall "华北销售额"        # stdout YAML / stderr 统计
+```
+
+### 本次测试
+
+- S3：37 条（20 题黄金集、关键词、YAML、额外上下文、往返次数、精度上限）
+- 合计：**112 条**；`make stage3` 会跑 S2 对账 + 全部后端测试。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -275,6 +368,7 @@ make stage0           # S0：后端契约测试 + 前端协议单测 + 构建（
 make stage0-ui        # 可选：真实 Chrome 冒烟（自起临时端口 8101/5274，跑完清理）
 make stage1           # S1：契约绿 + 负向夹具红 + 后端 S0/S1 测试（不需要 MySQL/Docker）
 make stage2           # S2：dry-run + --fresh + --verify + 幂等（需要 MySQL/ES/Qdrant）
+make stage3           # S3：S2 对账 + 20 题黄金集 + CLI YAML + 全部后端测试
 ```
 
 > `make stage2` 的前置是旧系统 docker compose 里的 MySQL / ES / Qdrant 已启动；
@@ -302,7 +396,10 @@ rebuild/
 │   ├── app/schema_contract.py # S1 检查器 + 文档生成器 + CLI
 │   ├── app/build_meta_knowledge.py # S2 CLI
 │   ├── app/build/          # S2 计划/embedding/三存储/manifest
-│   └── tests/              # S0 19 + S1 40 + S2 16 = 75 条
+│   ├── app/recall/         # S3 关键词/批量召回/合并过滤/YAML
+│   ├── app/scripts/recall.py # S3 CLI（stdout YAML + stderr 统计）
+│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 37 = 112 条
+│       └── recall/         # 20 题黄金集 + 关键词/渲染/往返测试
 ├── frontend/
 │   ├── src/App.tsx
 │   ├── src/lib/api.ts                # 运行时类型守卫 + SSE 解析器

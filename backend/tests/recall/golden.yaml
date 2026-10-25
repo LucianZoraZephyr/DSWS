@@ -1,0 +1,268 @@
+# S3 黄金集：20 个真实问题。
+#
+# expected_* 是「必须出现在最终 YAML 里」的最小集合；允许额外候选，但
+# tests/recall/test_golden.py 会同时检查 precision / 输出规模，防止
+# 「把所有表列指标都塞进去」这种作弊式全召回。
+#
+# expected_values 只列 ES value_index_rebuild 里真实存在的值；日期列
+# month/day 没有同步到 ES，因此不会出现在 expected_values 里。
+version: 1
+
+questions:
+  - id: q01
+    question: "华北销售额"
+    expected_tables: [dim_region, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.region_name
+      - fact_order.order_id
+      - fact_order.region_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: [华北]
+    must_not: [AOV, 销量, dim_region.province, dim_region.city]
+
+  - id: q02
+    question: "华东订单量"
+    expected_tables: [dim_region, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.region_name
+      - fact_order.order_id
+      - fact_order.region_id
+    expected_metrics: [订单量]
+    expected_values: [华东]
+    must_not: [GMV, 销量, AOV, dim_region.province]
+
+  - id: q03
+    question: "各省 GMV 排名"
+    expected_tables: [dim_region, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.province
+      - fact_order.order_id
+      - fact_order.region_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: []
+    must_not: [AOV, 订单量, dim_region.region_name]
+
+  - id: q04
+    question: "2025 年 1 月销量"
+    expected_tables: [dim_date, fact_order]
+    expected_columns:
+      - dim_date.date_id
+      - dim_date.year
+      - dim_date.month
+      - fact_order.order_id
+      - fact_order.date_id
+      - fact_order.order_quantity
+    expected_metrics: [销量]
+    expected_values: ["2025"]
+    must_not: [GMV, AOV, dim_date.quarter, dim_date.day]
+
+  - id: q05
+    question: "2025 年 3 月 GMV"
+    expected_tables: [dim_date, fact_order]
+    expected_columns:
+      - dim_date.date_id
+      - dim_date.year
+      - dim_date.month
+      - fact_order.order_id
+      - fact_order.date_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: ["2025"]
+    must_not: [销量, AOV, dim_date.quarter, dim_date.day]
+
+  - id: q06
+    question: "平均客单价"
+    expected_tables: [fact_order]
+    expected_columns:
+      - fact_order.order_id
+      - fact_order.order_amount
+    expected_metrics: [AOV]
+    expected_values: []
+    must_not: [GMV, 订单量, 平均件单价, 平均每单件数]
+
+  - id: q07
+    question: "平均件单价"
+    expected_tables: [fact_order]
+    expected_columns:
+      - fact_order.order_id
+      - fact_order.order_quantity
+      - fact_order.order_amount
+    expected_metrics: [平均件单价]
+    expected_values: []
+    must_not: [AOV, GMV, 销量, 平均每单件数]
+
+  - id: q08
+    question: "平均每单件数"
+    expected_tables: [fact_order]
+    expected_columns:
+      - fact_order.order_id
+      - fact_order.order_quantity
+    expected_metrics: [平均每单件数]
+    expected_values: []
+    must_not: [AOV, GMV, 销量, 平均件单价]
+
+  - id: q09
+    question: "各品类销量"
+    expected_tables: [dim_product, fact_order]
+    expected_columns:
+      - dim_product.product_id
+      - dim_product.category
+      - fact_order.order_id
+      - fact_order.product_id
+      - fact_order.order_quantity
+    expected_metrics: [销量]
+    expected_values: []
+    must_not: [GMV, AOV, dim_region.province]
+
+  - id: q10
+    question: "品牌销售额 Top 3"
+    expected_tables: [dim_product, fact_order]
+    expected_columns:
+      - dim_product.product_id
+      - dim_product.brand
+      - fact_order.order_id
+      - fact_order.product_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: []
+    must_not: [AOV, 销量, dim_region.province]
+
+  - id: q11
+    question: "品类平均件单价"
+    expected_tables: [dim_product, fact_order]
+    expected_columns:
+      - dim_product.product_id
+      - dim_product.category
+      - fact_order.order_id
+      - fact_order.product_id
+      - fact_order.order_quantity
+      - fact_order.order_amount
+    expected_metrics: [平均件单价]
+    expected_values: []
+    must_not: [GMV, AOV, 销量]
+
+  - id: q12
+    question: "黄金会员订单量"
+    expected_tables: [dim_customer, fact_order]
+    expected_columns:
+      - dim_customer.customer_id
+      - dim_customer.member_level
+      - fact_order.order_id
+      - fact_order.customer_id
+    expected_metrics: [订单量]
+    expected_values: [黄金]
+    must_not: [GMV, 销量, dim_customer.gender]
+
+  - id: q13
+    question: "女性客户 GMV"
+    expected_tables: [dim_customer, fact_order]
+    expected_columns:
+      - dim_customer.customer_id
+      - dim_customer.gender
+      - fact_order.order_id
+      - fact_order.customer_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: [女]
+    must_not: [订单量, 销量, dim_customer.member_level]
+
+  - id: q14
+    question: "华东男性客户订单量"
+    expected_tables: [dim_region, dim_customer, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.region_name
+      - dim_customer.customer_id
+      - dim_customer.gender
+      - fact_order.order_id
+      - fact_order.customer_id
+      - fact_order.region_id
+    expected_metrics: [订单量]
+    expected_values: [华东, 男]
+    must_not: [GMV, 销量, dim_region.province]
+
+  - id: q15
+    question: "华南 2025Q1 销售额"
+    expected_tables: [dim_region, dim_date, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.region_name
+      - dim_date.date_id
+      - dim_date.year
+      - dim_date.quarter
+      - fact_order.order_id
+      - fact_order.date_id
+      - fact_order.region_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: [华南, "2025", Q1]
+    must_not: [AOV, 销量, dim_date.month, dim_date.day]
+
+  - id: q16
+    question: "各省平均订单金额"
+    expected_tables: [dim_region, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.province
+      - fact_order.order_id
+      - fact_order.region_id
+      - fact_order.order_amount
+    expected_metrics: [AOV]
+    expected_values: []
+    must_not: [GMV, 订单量, dim_region.region_name]
+
+  - id: q17
+    question: "哪个省销量最高"
+    expected_tables: [dim_region, fact_order]
+    expected_columns:
+      - dim_region.region_id
+      - dim_region.province
+      - fact_order.order_id
+      - fact_order.region_id
+      - fact_order.order_quantity
+    expected_metrics: [销量]
+    expected_values: []
+    must_not: [AOV, 订单量, dim_region.region_name]
+
+  - id: q18
+    question: "各会员等级平均每单件数"
+    expected_tables: [dim_customer, fact_order]
+    expected_columns:
+      - dim_customer.customer_id
+      - dim_customer.member_level
+      - fact_order.order_id
+      - fact_order.customer_id
+      - fact_order.order_quantity
+    expected_metrics: [平均每单件数]
+    expected_values: []
+    must_not: [GMV, AOV, 订单量, dim_customer.gender]
+
+  - id: q19
+    question: "华为品牌销售额"
+    expected_tables: [dim_product, fact_order]
+    expected_columns:
+      - dim_product.product_id
+      - dim_product.brand
+      - fact_order.order_id
+      - fact_order.product_id
+      - fact_order.order_amount
+    expected_metrics: [GMV]
+    expected_values: [华为]
+    must_not: [AOV, 销量, dim_region.province]
+
+  - id: q20
+    question: "食品饮料品类订单量"
+    expected_tables: [dim_product, fact_order]
+    expected_columns:
+      - dim_product.product_id
+      - dim_product.category
+      - fact_order.order_id
+      - fact_order.product_id
+    expected_metrics: [订单量]
+    expected_values: [食品饮料]
+    must_not: [GMV, AOV, 销量]
