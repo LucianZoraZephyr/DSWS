@@ -5,6 +5,8 @@
 
 路线图见 `../shopkeeper-agent/docs/REBUILD-ROADMAP.md`。
 
+从零搭建/验收手册见 [`docs/SETUP-FROM-SCRATCH.md`](docs/SETUP-FROM-SCRATCH.md)。
+
 ---
 
 ## 当前进度
