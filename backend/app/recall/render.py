@@ -69,6 +69,7 @@ def table_to_dict(table: TableContext) -> dict[str, Any]:
             {"column": item["column"], "references": item["references"]}
             for item in table.foreign_keys
         ],
+        "measures": [dict(item) for item in table.measures],
         "columns": [column_to_dict(column) for column in table.columns],
     }
 
@@ -97,6 +98,7 @@ def state_to_dict(state: RecallState) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "query": state.query,
         "contract_version": state.contract_version,
+        "dataset": dict(state.dataset),
         "keywords": list(state.keywords),
         "extra_context": dict(state.extra_context),
         "tables": [table_to_dict(table) for table in state.tables],

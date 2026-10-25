@@ -107,6 +107,7 @@ class TableContext:
     grain: str
     primary_key: str | None
     foreign_keys: list[dict[str, str]] = field(default_factory=list)
+    measures: list[dict[str, Any]] = field(default_factory=list)
     columns: list[ColumnContext] = field(default_factory=list)
 
 

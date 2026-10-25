@@ -249,7 +249,8 @@ uv run python -m app.build_meta_knowledge --assert-idempotent # 第二次必须 
 - S0：19 条
 - S1：40 条
 - S2：16 条（计划计数、同步策略、examples 截断、确定性 ID/hash、坏契约拒绝、dry-run 等）
-- 合计：**75 条**；`make stage2` 会跑全部。
+- S2 完成时合计：**75 条**；现在 `make stage2` 会收集全部 113 条
+  （其中 23 条 S3 真实存储集成测试默认跳过）。
 
 ---
 
@@ -279,8 +280,8 @@ query
 3. **完整 query 兜底**：契约里没有的客户名/商品名，原文仍会进入检索。
 
 单字别名（如 `省`）只作为字段提示，不直接当 ES 关键词；ES 兜底查询用
-完整短语 + 确定性中文 2-gram，并固定 `analyzer: keyword`，避免 IK 把
-`省`、`1` 这类单字放大成噪声。
+完整短语（走索引 analyzer）+ 确定性中文 2-gram（2-gram 固定 `analyzer: keyword`），
+避免 IK 把 `省`、`1` 这类单字放大成噪声。
 
 ### 往返次数是硬约束，不是「尽量批量」
 
@@ -308,14 +309,16 @@ query
 
 ### YAML 是给 LLM 的上下文，不是调试 dump
 
-- 契约字段全部保留：`name / type / role / description / aliases / value_domain /
-  grain / formula / expected_value / relevant_columns / rejected_values`；
+- 契约字段全部保留：表级 `grain / measures`，列级 `name / type / role / description /
+  aliases / value_domain`，指标级 `formula / expected_value / relevant_columns /
+  rejected_values`；根节点还保留完整 `dataset`；
 - Meta 的 `examples` 是 S2 截断后的前 10 条，因此每个字段显式写
   `examples_truncated: true` / `examples_limit: 10`，根节点再重复一次
   `examples_policy`；
 - 完整命中值放在 `matched_values`，不把 examples 伪装成全集；
 - `retrieval` 段记录往返次数、候选数、过滤前后计数，方便定位召回退化；
-- CLI 的 YAML 只走 stdout，统计只走 stderr，同一输入逐字节稳定。
+- CLI 的 YAML 只走 stdout，统计只走 stderr；渲染本身逐字节稳定，
+  `current_date / weekday / quarter` 来自运行日，跨天会变，需要固定日期时可注入 `now`。
 
 ### 黄金集
 
@@ -335,14 +338,14 @@ make stage3
 
 # 或者逐步看
 cd backend
-REBUILD_INTEGRATION=1 uv run pytest -q tests/recall   # 37 条：黄金集 + 往返 + 单测
+REBUILD_INTEGRATION=1 uv run pytest -q tests/recall   # 38 条：黄金集 + 往返 + 契约字段 + 单测
 uv run python -m app.scripts.recall "华北销售额"        # stdout YAML / stderr 统计
 ```
 
 ### 本次测试
 
-- S3：37 条（20 题黄金集、关键词、YAML、额外上下文、往返次数、精度上限）
-- 合计：**112 条**；`make stage3` 会跑 S2 对账 + 全部后端测试。
+- S3：38 条（20 题黄金集、关键词、YAML、契约字段保真、额外上下文、往返次数、精度上限）
+- 合计：**113 条**；`make stage3` 会跑 S2 对账 + 全部后端测试。
 
 ---
 
@@ -398,7 +401,7 @@ rebuild/
 │   ├── app/build/          # S2 计划/embedding/三存储/manifest
 │   ├── app/recall/         # S3 关键词/批量召回/合并过滤/YAML
 │   ├── app/scripts/recall.py # S3 CLI（stdout YAML + stderr 统计）
-│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 37 = 112 条
+│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 = 113 条
 │       └── recall/         # 20 题黄金集 + 关键词/渲染/往返测试
 ├── frontend/
 │   ├── src/App.tsx

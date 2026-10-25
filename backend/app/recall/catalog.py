@@ -48,6 +48,7 @@ class TableSpec:
     grain: str
     primary_key: str | None
     foreign_keys: tuple[dict[str, str], ...]
+    measures: tuple[dict[str, Any], ...]
     column_ids: tuple[str, ...]
     order: int
 
@@ -121,6 +122,9 @@ class Catalog:
                 grain=str(table.get("grain", "")),
                 primary_key=table.get("primary_key"),
                 foreign_keys=foreign_keys,
+                measures=tuple(
+                    dict(item) for item in table.get("measures") or []
+                ),
                 column_ids=tuple(column_ids),
                 order=table_order,
             )

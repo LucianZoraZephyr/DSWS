@@ -501,6 +501,7 @@ def merge_retrieved_info(
                 grain=str(row.get("grain") or ""),
                 primary_key=spec.primary_key,
                 foreign_keys=[dict(item) for item in spec.foreign_keys],
+                measures=[dict(item) for item in spec.measures],
                 columns=ordered_columns,
             )
         )
@@ -628,6 +629,7 @@ def filter_table(state: RecallState, catalog: Catalog) -> RecallState:
                 grain=table.grain,
                 primary_key=table.primary_key,
                 foreign_keys=foreign_keys,
+                measures=list(table.measures),
                 columns=columns,
             )
         )
@@ -682,6 +684,7 @@ def _prune_after_metric_filter(
                     grain=table.grain,
                     primary_key=table.primary_key,
                     foreign_keys=list(table.foreign_keys),
+                    measures=list(table.measures),
                     columns=columns,
                 )
             )
@@ -731,6 +734,7 @@ def _prune_after_metric_filter(
                 grain=table.grain,
                 primary_key=table.primary_key,
                 foreign_keys=foreign_keys,
+                measures=list(table.measures),
                 columns=columns,
             )
         )

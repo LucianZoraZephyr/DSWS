@@ -64,6 +64,14 @@ def make_state() -> RecallState:
         foreign_keys=[
             {"column": "region_id", "references": "dim_region.region_id"}
         ],
+        measures=[
+            {
+                "column": "order_id",
+                "aggregation": "count_distinct",
+                "unit": "单",
+                "description": "一行一单；COUNT(DISTINCT order_id) 得订单量。",
+            }
+        ],
         columns=[column],
     )
     metric = MetricContext(
@@ -112,6 +120,7 @@ def make_state() -> RecallState:
             )
         ],
         extra_context={"current_date": "2026-10-25"},
+        dataset=dict(default_catalog().dataset),
         contract_version=1,
         trace={
             "targets": {"es_index": "value_index_rebuild"},
@@ -134,6 +143,9 @@ def test_render_keeps_every_contract_field() -> None:
 
     assert payload["query"] == "华北销售额"
     assert payload["contract_version"] == 1
+    assert payload["dataset"]["name"] == "dw"
+    assert payload["dataset"]["expected_tables"] == 5
+    assert payload["dataset"]["expected_fact_rows"] == 115
     assert payload["keywords"] == ["华北销售额", "华北", "销售额"]
 
     table = payload["tables"][0]
@@ -144,6 +156,14 @@ def test_render_keeps_every_contract_field() -> None:
     assert table["primary_key"] == "order_id"
     assert table["foreign_keys"] == [
         {"column": "region_id", "references": "dim_region.region_id"}
+    ]
+    assert table["measures"] == [
+        {
+            "column": "order_id",
+            "aggregation": "count_distinct",
+            "unit": "单",
+            "description": "一行一单；COUNT(DISTINCT order_id) 得订单量。",
+        }
     ]
 
     column = table["columns"][0]

@@ -25,6 +25,7 @@ import yaml
 from app.recall.catalog import default_catalog
 from app.recall.clients import RecallStack
 from app.recall.pipeline import recall
+from app.recall.render import render
 
 GOLDEN_PATH = os.path.join(os.path.dirname(__file__), "golden.yaml")
 with open(GOLDEN_PATH, encoding="utf-8") as handle:
@@ -217,3 +218,62 @@ def test_golden_aggregate_recall_and_precision(recalled) -> None:
     assert mean(metric_precisions) >= 0.9
     assert mean(value_precisions) >= 0.9
     assert mean(candidate_recalls) >= 0.85
+
+
+def test_golden_yaml_preserves_contract_fields(recalled) -> None:
+    """真实检索 YAML 里每个入选实体的契约字段都必须原样保留。"""
+    catalog = default_catalog()
+    state = recalled["q01"]
+    payload = yaml.safe_load(render(state))
+
+    assert payload["contract_version"] == catalog.contract_version
+    assert payload["dataset"] == catalog.dataset
+
+    for table_payload in payload["tables"]:
+        table_spec = catalog.table(table_payload["name"])
+        assert table_spec is not None
+        assert table_payload["role"] == table_spec.role
+        assert table_payload["description"] == table_spec.description
+        assert table_payload["grain"] == table_spec.grain
+        assert table_payload["primary_key"] == table_spec.primary_key
+        assert table_payload["measures"] == [
+            dict(item) for item in table_spec.measures
+        ]
+        # 过滤层允许裁掉不需要的 join 边，但保留下来的 FK 必须是契约里的。
+        contract_fks = [dict(item) for item in table_spec.foreign_keys]
+        for foreign_key in table_payload["foreign_keys"]:
+            assert foreign_key in contract_fks
+
+        for column_payload in table_payload["columns"]:
+            column_spec = catalog.column(column_payload["id"])
+            assert column_spec is not None
+            assert column_payload["name"] == column_spec.name
+            assert column_payload["table_id"] == column_spec.table_id
+            assert column_payload["type"] == column_spec.type
+            assert column_payload["role"] == column_spec.role
+            assert column_payload["nullable"] == column_spec.nullable
+            assert column_payload["description"] == column_spec.description
+            assert column_payload["aliases"] == list(column_spec.aliases)
+            assert column_payload["value_domain"] == column_spec.value_domain
+            assert column_payload["references"] == catalog.references(
+                column_payload["id"]
+            )
+            assert column_payload["examples_truncated"] is True
+            assert column_payload["examples_limit"] == 10
+
+    for metric_payload in payload["metrics"]:
+        metric_spec = catalog.metric(metric_payload["name"])
+        assert metric_spec is not None
+        assert metric_payload["label"] == metric_spec.label
+        assert metric_payload["description"] == metric_spec.description
+        assert metric_payload["formula"] == metric_spec.formula
+        assert metric_payload["relevant_columns"] == list(
+            metric_spec.relevant_columns
+        )
+        assert metric_payload["aliases"] == list(metric_spec.aliases)
+        assert metric_payload["aggregation"] == metric_spec.aggregation
+        assert metric_payload["expected_value"] == metric_spec.expected_value
+        assert metric_payload["grain"] == metric_spec.grain
+        assert metric_payload["rejected_values"] == [
+            dict(item) for item in metric_spec.rejected_values
+        ]
