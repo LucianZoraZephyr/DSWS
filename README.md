@@ -7,6 +7,7 @@
 - 路线图：`../shopkeeper-agent/docs/REBUILD-ROADMAP.md`
 - 从零搭建 / 排障 / 环境变量：[`docs/SETUP-FROM-SCRATCH.md`](docs/SETUP-FROM-SCRATCH.md)
 - S7 设计记录：[`docs/S7-HANDOFF.md`](docs/S7-HANDOFF.md)
+- Docker 部署：[`docs/DOCKER-DEPLOY.md`](docs/DOCKER-DEPLOY.md)
 
 ---
 
@@ -24,7 +25,7 @@
 | **S7 前端收口** | ✅ 完成 | `make stage7` + `make stage7-ui` |
 | S8 性能 | ⬜ 待做 | `make stage8` |
 
-当前验收数据：后端 **521 passed / 30 skipped**，前端 **40 passed**，
+当前验收数据：后端 **527 passed / 30 skipped**，前端 **40 passed**，
 SSE 夹具 **14 条**，`tsc --noEmit` 零错误。
 
 ---
@@ -45,6 +46,19 @@ make dev-frontend     # http://127.0.0.1:5273
 
 打开 http://127.0.0.1:5273 提问，步骤条会依次点亮。
 健康检查返回 `{"status":"ok","stage":"S7"}`。
+
+### Docker 一键部署
+
+前置：Docker Compose v2；首次构建需要网络。
+
+```bash
+make docker-env      # 生成 .env（随机密码；已存在则跳过）
+make docker-up       # 构建并启动五服务 + 一次性 init
+curl http://127.0.0.1:8080/api/health
+make docker-smoke    # 完整验收
+```
+
+详见 [`docs/DOCKER-DEPLOY.md`](docs/DOCKER-DEPLOY.md)。
 
 > **Windows**：先执行 `chcp 65001`。控制台默认 GBK，`make` 自己 echo 的中文
 > 可能触发 `UnicodeEncodeError`；Python CLI 内部已固定 UTF-8。
@@ -176,8 +190,12 @@ Qdrant `column_info_rebuild` / `metric_info_rebuild`。每次成功构建写
 **命令**
 
 ```bash
-# 前置：三存储在运行；已有则跳过。不要 up 全部，也不要 down -v。
-(cd ../shopkeeper-agent/docker && docker compose up -d mysql elasticsearch qdrant)
+# 本地开发：在仓库根目录只启动三存储（首次需 make docker-env）
+make docker-env
+docker compose up -d mysql elasticsearch qdrant
+
+# Compose 密码是随机生成的；宿主 CLI 不会自动读 .env
+source scripts/export-docker-env.sh
 
 make stage2
 
@@ -200,6 +218,8 @@ ES 1 次 `_msearch`、Qdrant 2 次批量搜索、Meta 5 条 SQL，防止退化�
 
 ```bash
 # 前置：S2 已完成，三存储对账通过
+# 新终端里先导出 Compose 凭据；S2 块的导出不会跨终端保留
+source scripts/export-docker-env.sh
 make stage3
 
 # 单题检索：YAML 到 stdout，统计到 stderr
@@ -242,13 +262,15 @@ make stage5        # 离线门禁：36 条注入语料 + 11 条正常查询
 # 单条 SQL 的策略判定
 (cd backend && uv run python -m app.scripts.security --policy "SELECT 1 FROM fact_order; DROP TABLE fact_order")
 
-# 实战验收：需要已装载 dw 的 MySQL；密码只从环境变量给
-export REBUILD_DW_RO_PASSWORD='<只读账号密码>'
+# 实战验收：需要已装载 dw 的 MySQL
+# Compose 密码是随机生成的；helper 同时导出只读、root 与 app 凭据
+source scripts/export-docker-env.sh
 make stage5-live
 ```
 
-`stage5-live` 开通账号还需要 `REBUILD_MYSQL_ROOT_PASSWORD`；两屏对比 demo
-使用 `REBUILD_MYSQL_USER` / `REBUILD_MYSQL_PASSWORD`，详见 SETUP 手册。
+`source scripts/export-docker-env.sh` 同时导出 `REBUILD_MYSQL_ROOT_PASSWORD`
+（开通账号）以及 `REBUILD_MYSQL_USER` / `REBUILD_MYSQL_PASSWORD`（两屏对比 demo），
+详见 SETUP 手册。
 
 ### S6 · 失败通道
 
@@ -344,8 +366,9 @@ rebuild/
 2. **生成物不要手改**：`frontend/src/generated/` 是机器产物。
 3. **只动 rebuild 目标**：S2/S3 不修改旧系统的 `meta` / `value_index` /
    `column_info_collection` / `metric_info_collection`；不要 `docker compose down -v`。
-4. **S2/S3 的外部前置**：旧系统 compose 里的 MySQL / ES / Qdrant 已启动；
-   ES 需要带 IK 分词插件的镜像。S2 默认哈希向量，embedding 容器坏了不影响。
+4. **S2/S3 的外部前置**：仓库根 `compose.yaml` 可只启动
+   `mysql elasticsearch qdrant`；ES 使用官方镜像，S2 自动回退 `standard`
+   analyzer，IK 是后续可选增强。S2 默认哈希向量，不需要 embedding 容器。
 5. **S5 实战需要 MySQL**：`REBUILD_DW_RO_PASSWORD` 由环境提供，不在仓库里。
 6. **浏览器验收需要 Chrome / Edge**：`playwright-core` 不自带浏览器；
    Windows 上用 Edge 即可。

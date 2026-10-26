@@ -27,10 +27,12 @@ make install
 make stage0
 make stage1
 
-# 4) 启动 MySQL / ES / Qdrant（只启动这三个）
-cd ../shopkeeper-agent/docker
+# 4) 启动 MySQL / ES / Qdrant（只启动这三个；首次需 make docker-env）
+make docker-env
 docker compose up -d mysql elasticsearch qdrant
-cd ../../rebuild
+
+# Compose 密码是随机生成的；宿主 CLI 不会自动读 .env
+source scripts/export-docker-env.sh
 
 # 5) 构建元知识，再跑检索
 make stage2
@@ -107,14 +109,14 @@ git remote -v
 ```text
 A020-电商问数智能体实战教程fixed/
 ├── code/
-│   ├── rebuild/                  # S0–S3 的实现
+│   ├── rebuild/                  # S0–S7 的实现 + Docker Compose 部署
 │   └── shopkeeper-agent/
-│       └── docker/               # S2/S3 需要的 MySQL/ES/Qdrant compose
+│       └── docker/               # 旧系统的 compose（只读参考，S2/S3 不再使用）
 ```
 
-- **只复制 `rebuild/`**：S0/S1 可以跑；S2/S3 需要你另外提供兼容的三存储。
-- **复制整个 `fixed/`**：按本手册最省事。
-- `shopkeeper-agent/` 是旧系统，**只读参考/负向夹具/compose 来源**，不要修改它。
+- **只复制 `rebuild/`**：S0/S1 可以跑；S2/S3 需要 Docker，用仓库根 `compose.yaml` 只启动三存储。
+- **复制整个 `fixed/`**：也可以，但 rebuild 已自带部署所需的 `compose.yaml`。
+- `shopkeeper-agent/` 是旧系统，**只读参考/负向夹具来源**，不要修改它；S2/S3 不再使用它的 compose。
 - `rebuild/fixtures/legacy/` 是冻结的旧配置副本，S1 用它证明“旧系统必须红”；不需要旧系统源码也能跑 S1。
 
 ### 1.3 端口
@@ -226,25 +228,32 @@ S1 PASS
 S2 和 S3 需要 **MySQL + Elasticsearch + Qdrant**。S3 不需要 LLM，也不需要旧的 embedding 容器。
 
 ```bash
-cd ../shopkeeper-agent/docker
-
-# 只启动这三个，不要 up 全部
+# 在仓库根目录执行
+make docker-env
 docker compose up -d mysql elasticsearch qdrant
+
+# Compose 密码是随机生成的；宿主 CLI 不会自动读 .env
+source scripts/export-docker-env.sh
 ```
 
-如果 `3306 / 9200 / 6333` 已经由旧系统 compose 启动，直接探活即可，不要重复 `up`。
+`make docker-env` 生成的 Compose 密码是随机的，宿主 CLI 不会自动读 `.env`；
+上面的 helper 把它们导出为 `REBUILD_*` 变量（成功时不打印任何内容）。
 
-首次启动可能比较久，并且需要网络（拉镜像/构建自定义 ES 镜像）：
+如果 `3306 / 9200 / 6333` 已经有服务在跑，直接探活即可，不要重复 `up`；
+不要用旧系统的 compose。
 
-- `elasticsearch` 会构建一个带 IK 分词插件的自定义镜像；
+首次启动需要网络（拉取镜像）：
+
+- Elasticsearch 使用官方 8.15.3 镜像，不含 IK；S2 会自动回退 `standard` analyzer；
 - MySQL / ES 有 healthcheck；
-- Qdrant 没有 healthcheck，需要自己用 HTTP 探活。
+- Qdrant 没有 healthcheck，全量 Docker 部署时 `init` 会自己轮询 `/collections`。
 
 等待就绪：
 
 ```bash
 # MySQL
-docker compose exec mysql mysqladmin ping -h 127.0.0.1 -uroot -pdili123
+docker compose exec mysql sh -c \
+  'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"'
 
 # Elasticsearch
 curl -fsS http://127.0.0.1:9200/_cluster/health
@@ -253,41 +262,29 @@ curl -fsS http://127.0.0.1:9200/_cluster/health
 curl -fsS http://127.0.0.1:6333/collections
 ```
 
-三个都返回成功后再回 `rebuild`：
+三个都返回成功后再继续（仍在仓库根目录）：
 
 ```bash
-cd ../../rebuild
+# 仍在仓库根目录
 ```
 
 #### 重要：不要启动全部服务
 
-```bash
-# ❌ 不要这样
-docker compose up -d
-```
+`compose.yaml` 里的 `backend` / `frontend` 是 rebuild 自己的服务；如果只是给
+本机 S2/S3 准备存储，按上面的命令只启动三个。不要用旧系统的 compose。
 
-原因：
-
-- `embedding` 容器需要 1.3GB 的 bge 权重，当前环境可能一直 restarting；
-- `api` / `web` 是旧系统的 8000 / 5173，不是 rebuild；
-- `kibana` 对 S2/S3 没用；
-- S2/S3 默认用 `hash-ngram-v1` 哈希向量，不需要 `embedding`。
+S2/S3 默认用 `hash-ngram-v1` 哈希向量，不需要 embedding 容器。
 
 #### 重要：不要 `down -v`
 
-```bash
-# ❌ 不要为了“重置 rebuild”执行
-docker compose down -v
-```
-
-`down -v` 会删 compose 的 MySQL/ES/Qdrant 数据卷，旧系统数据也会一起没。
-默认配置下，S2 的 `--fresh` 只删 **rebuild 自己的目标**，不会删数据卷；两者不是一回事。
-如果把目标名覆盖成旧系统目标，`--fresh` 仍会删旧数据，见第 4 节。
+仓库根 `compose.yaml` 的数据卷只属于 rebuild。`make docker-down` 保留数据卷；
+`make docker-reset` 会要求输入 `yes`，然后才删除 rebuild 的 MySQL/ES/Qdrant
+数据卷。任何时候都不要在旧系统目录执行 `docker compose down -v`。
 
 > ⚠️ **未在本 shell 验证**：当前审计账户没有 Docker socket 权限，`docker ps` 报
-> `permission denied ... /var/run/docker.sock`。上面的 compose 命令是按
-> `code/shopkeeper-agent/docker/docker-compose.yaml` 静态整理；本机的 S2/S3 是针对
-> **已经运行的三存储**验证的，不是本轮从零 `docker compose up` 验证的。
+> `permission denied ... /var/run/docker.sock`。上面的 compose 命令对应仓库根的
+> `compose.yaml`；本机的 S2/S3 是针对**已经运行的三存储**验证的，不是本轮从零
+> `docker compose up` 验证的。
 >
 > 如果你遇到同样的权限错误，需要用有 Docker 权限的账号，或把当前用户加入
 > `docker` 组后重新登录：
@@ -303,6 +300,8 @@ docker compose down -v
 ### 2.5 S2：构建元知识
 
 ```bash
+# 新终端里先导出 Compose 凭据；同一终端已 source 可跳过
+source scripts/export-docker-env.sh
 make stage2
 ```
 
@@ -345,6 +344,7 @@ S2 PASS
 真正的零写入断言是：
 
 ```bash
+source scripts/export-docker-env.sh
 cd backend
 uv run python -m app.build_meta_knowledge --assert-idempotent
 # 期望：NOOP: 0 writes
@@ -377,6 +377,8 @@ Meta 里的 `examples` 是**排序后的前 10 条**，不是完整值域：
 前置：S2 已成功构建，三存储可访问。
 
 ```bash
+# 新终端里先导出 Compose 凭据；同一终端已 source 可跳过
+source scripts/export-docker-env.sh
 make stage3
 ```
 
@@ -407,6 +409,7 @@ S3 PASS
 #### 手动看 S3 的 YAML
 
 ```bash
+source scripts/export-docker-env.sh
 cd backend
 uv run python -m app.scripts.recall "华北销售额"
 ```
@@ -543,10 +546,12 @@ S5 的底线是**执行器只用一个在 `dw` 上只有 SELECT 的账号**。
 正是 D6 能发生的根本原因。
 
 ```bash
-# 密码由你给，不在仓库里
-export REBUILD_DW_RO_PASSWORD='<你自己的密码>'
+# Compose 密码是随机生成的；helper 同时导出只读、root 与 app 凭据
+source scripts/export-docker-env.sh
 make stage5-live
 ```
+
+> 不用仓库根 Compose 时，仍可按同一组 `REBUILD_*` 变量手动提供凭据。
 
 它做三件事：
 
@@ -640,7 +645,7 @@ make stage7
 3. **前端契约测试**：`pytest -q tests/frontend`（45 条：生成器 / 夹具 / 类型保真）。
 4. **前端协议单测 + 构建**：`npm run test`（40 条）+ `npm run build`
    （即 `tsc --noEmit` 零错误 + Vite 构建）。
-5. **全量后端测试**：S0–S7 共 521 passed / 30 skipped。
+5. **全量后端测试**：527 passed / 30 skipped（S0–S7 + 6 条 Docker init 测试）。
 
 生成物**不要手改**。改了契约就重新生成：
 
@@ -766,10 +771,10 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 
 当前测试总数：
 
-- 后端：`19 + 40 + 16 + 38 + 113 + 173 + 107 + 45 = 551`（其中 30 条按需跳过，
-  实际通过 521 条）
+- 后端：`19 + 40 + 16 + 38 + 113 + 173 + 107 + 45 + 6 = 557`（其中 30 条按需跳过，
+  实际通过 527 条；最后 6 条是 Docker init 测试）
 - 前端：`40`（26 协议 + 14 结果表）+ 2 个 S0/S6 无头浏览器用例 + 14 条 S7 断言
-- 全量后端默认：`521 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
+- 全量后端默认：`527 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
   5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过，
   2 条是 S5 里「这一题是拒答，不产生 SQL」的按需跳过）
 - `make stage3` 的 S3 集成：`38 passed`
@@ -807,6 +812,11 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 | `REBUILD_LLM_BASE_URL` | 无 | S4 接真实 LLM 时的 OpenAI 兼容端点 |
 | `REBUILD_LLM_API_KEY` | 无 | 同上 |
 | `REBUILD_LLM_MODEL` | 无 | 同上 |
+
+> **注意**：表中的默认值描述的是**独立的本机 MySQL**。使用仓库根
+> `compose.yaml` 时，密码由 `make docker-env` 随机生成并写在 `.env` 中；
+> 宿主 CLI 不会自动读取 `.env`，请先 `source scripts/export-docker-env.sh`
+> 再跑 S2/S3/S5。
 
 > `REBUILD_DW_RO_PASSWORD` 没有默认值是**故意的**：只读账号的密码属于秘密，
 > 不进仓库、不进契约、不进任何生成物。缺它时 `make stage5-live` 会**直接报错**，
@@ -892,7 +902,7 @@ uv run python -m app.build_meta_knowledge --dry-run
 |---|---|---|
 | `permission denied ... /var/run/docker.sock` | 当前用户没有 Docker socket 权限 | 用有权限的账号，或加入 `docker` 组后重新登录 |
 | `Connection refused` 到 3306/9200/6333 | 三存储没起，或端口没映射 | 按 2.4 启动，`curl` 探活 |
-| `S2 FAIL: ... unknown analyzer [ik_max_word]` | 用了普通 ES 镜像，不是带 IK 的 compose 镜像 | 用 `code/shopkeeper-agent/docker` 里的 `elasticsearch` 构建 |
+| `S2 FAIL: ... unknown analyzer [ik_max_word]` | 官方 ES 没有 IK；S2 应自动回退 `standard` | 若仍失败，看 `init` 日志并确认 `es_store.create()` 的回退分支 |
 | `S2 FAIL: ... Access denied` | MySQL 账号/密码不对 | 检查 `REBUILD_MYSQL_*`；默认来自 compose |
 | `S2 FAIL: ... count mismatch` | 目标里有旧数据，或 manifest 过期 | 先 `--dry-run` 确认 targets，再 `--fresh` |
 | `S2 VERIFY FAIL` | S2 没构建好，或 S3 用了不同 env | 先 `make stage2`；确认 S2/S3 环境变量一致 |
@@ -904,7 +914,7 @@ uv run python -m app.build_meta_knowledge --dry-run
 | `examples` 里没有某个值 | `examples` 只保留排序后前 10 条 | 查契约 `value_domain` / ES / S3 `matched_values` |
 | S3 候选统计和上次不同 | Qdrant 索引重建后调试统计变化 | 看黄金集和最终上下文；`retrieval` 不是契约 |
 | `make stage5-live` 报「缺少环境变量 REBUILD_DW_RO_PASSWORD」 | 只读账号的密码**故意不在仓库里** | `export REBUILD_DW_RO_PASSWORD='<你自己的密码>'` 再跑 |
-| `make stage5-live` 连不上 3306 | MySQL 没起 | 按 2.4 只启动 mysql；`dw` 库要由 `fixtures/dw.sql` 装载 |
+| `make stage5-live` 连不上 3306 | MySQL 没起 | 按 2.4 启动 mysql；首次启动会由 entrypoint 导入 `fixtures/dw.sql` |
 | `make stage5-live` 的 `--demo` 报权限不足 | `--demo` 需要一个有权限的账号来复现旧系统行为 | 确认 `REBUILD_MYSQL_USER` / `REBUILD_MYSQL_PASSWORD` 是那个 ALL PRIVILEGES 账号 |
 | `make stage6-ui` 报「找不到 Chrome/Edge」 | playwright-core 不自带浏览器 | 装 Chrome 或 Edge，或设 `CHROME_PATH=/path/to/chrome` |
 | `make stage6-ui` 报端口被占用 | 8102 / 5275 被别的进程占了 | `API_PORT=8202 WEB_PORT=5375 make stage6-ui` |

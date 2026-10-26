@@ -12,5 +12,10 @@ frontend/dist/
 .DS_Store
 *.log
 
+# Docker 部署密钥（模板 .env.example 入库）
+.env
+.env.*
+!.env.example
+
 # 这个 config.py 是 S2 的构建配置模块，不是本地密钥
 !backend/app/build/config.py

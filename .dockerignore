@@ -1,0 +1,22 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+backend/.venv
+backend/.pytest_cache
+backend/tests
+**/__pycache__
+**/*.py[cod]
+
+frontend/node_modules
+frontend/dist
+frontend/tests
+
+docs
+scripts
+*.log
+.DS_Store
+
+# 构建需要保留：contracts/、fixtures/、backend/app/、backend/pyproject.toml、backend/uv.lock

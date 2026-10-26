@@ -1,0 +1,155 @@
+name: shopkeeper-rebuild
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: docker/backend.Dockerfile
+  args:
+    PYTHON_IMAGE: ${PYTHON_IMAGE:?}
+    UV_IMAGE: ${UV_IMAGE:?}
+    UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:?}
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?}
+      - MYSQL_ROOT_HOST=%
+      - MYSQL_DATABASE=dw
+      - MYSQL_USER=didilili
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    ports:
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./fixtures/dw.sql:/docker-entrypoint-initdb.d/10-dw.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  elasticsearch:
+    image: ${ELASTICSEARCH_IMAGE:?}
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:${ES_HOST_PORT:-9200}:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  qdrant:
+    image: ${QDRANT_IMAGE:?}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${QDRANT_HOST_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  init:
+    image: shopkeeper-rebuild/backend:local
+    build: *backend-build
+    restart: "no"
+    command: ["python", "-m", "app.scripts.docker_init"]
+    environment:
+      - REBUILD_MYSQL_HOST=mysql
+      - REBUILD_MYSQL_PORT=3306
+      - REBUILD_MYSQL_USER=didilili
+      - REBUILD_MYSQL_PASSWORD=${MYSQL_PASSWORD:?}
+      - REBUILD_MYSQL_ROOT_USER=root
+      - REBUILD_MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?}
+      - REBUILD_DW_RO_PASSWORD=${REBUILD_DW_RO_PASSWORD:?}
+      - REBUILD_ES_URL=http://elasticsearch:9200
+      - REBUILD_QDRANT_URL=http://qdrant:6333
+    depends_on:
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  backend:
+    image: shopkeeper-rebuild/backend:local
+    build: *backend-build
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8100"
+      - --workers
+      - "1"
+    environment:
+      - REBUILD_MYSQL_HOST=mysql
+      - REBUILD_MYSQL_PORT=3306
+      - REBUILD_DW_RO_PASSWORD=${REBUILD_DW_RO_PASSWORD:?}
+      - REBUILD_ES_URL=http://elasticsearch:9200
+      - REBUILD_QDRANT_URL=http://qdrant:6333
+      - REBUILD_LLM_BASE_URL=${REBUILD_LLM_BASE_URL:-}
+      - REBUILD_LLM_API_KEY=${REBUILD_LLM_API_KEY:-}
+      - REBUILD_LLM_MODEL=${REBUILD_LLM_MODEL:-}
+      - REBUILD_LLM_TIMEOUT=${REBUILD_LLM_TIMEOUT:-30}
+    ports:
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8100}:8100"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/api/health', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  frontend:
+    image: shopkeeper-rebuild/frontend:local
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:?}
+        NGINX_IMAGE: ${NGINX_IMAGE:?}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_HOST_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1/healthz >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  mysql_data:
+  es_data:
+  qdrant_data:

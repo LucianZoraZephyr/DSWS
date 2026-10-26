@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live stage6 stage6-ui stage7 stage7-ui baseline
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live stage6 stage6-ui stage7 stage7-ui baseline docker-env docker-up docker-down docker-logs docker-smoke docker-reset
 
 install:
 	cd backend && uv sync --frozen
@@ -154,3 +154,28 @@ stage7:
 # 前置：需要 Chrome / Edge（Windows 上用 Edge 也行）。
 stage7-ui:
 	./scripts/stage7-ui.sh
+
+# ---------------------------------------------------------------------------
+# Docker 部署（单机 Compose；详见 docs/DOCKER-DEPLOY.md）
+# ---------------------------------------------------------------------------
+
+docker-env:
+	@test -f .env || python scripts/generate_docker_env.py
+
+docker-up: docker-env
+	docker compose up -d --build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f --tail=100
+
+docker-smoke: docker-env
+	./scripts/docker-smoke.sh
+
+docker-reset:
+	@printf '这会删除 shopkeeper-rebuild_mysql_data、shopkeeper-rebuild_es_data、shopkeeper-rebuild_qdrant_data。输入 yes 继续：'; \
+	read -r answer; \
+	test "$$answer" = "yes"
+	docker compose down -v
