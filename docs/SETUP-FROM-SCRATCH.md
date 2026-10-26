@@ -1,8 +1,8 @@
-# 从零搭建 rebuild（S0–S4 已验证版）
+# 从零搭建 rebuild（S0–S5 已验证版）
 
-> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL**。
-> **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；S4 与本手册位于 `main`。
-> **不包含**：S5 安全、S6 失败通道、S7 前端收口、S8 性能。
+> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL、S5 安全边界**。
+> **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；S4 / S5 与本手册位于 `main`。
+> **不包含**：S6 失败通道、S7 前端收口、S8 性能。
 >
 > 这份手册刻意把三件事分开写：
 >
@@ -38,12 +38,18 @@ make stage3
 
 # 6) S4：生成 SQL（不需要三存储）
 make stage4
+
+# 7) S5：安全边界（不需要三存储）
+make stage5
 ```
 
-如果上面的命令全部打印 `PASS`，说明 S0–S4 的代码级验收通过。
+如果上面的命令全部打印 `PASS`，说明 S0–S5 的代码级验收通过。
 
 > S4 单独拿出来也能跑：它只到「生成 + 静态校验」，上下文由契约离线裁剪，
 > **不需要 MySQL / ES / Qdrant，也不需要 API key 或网络**。
+>
+> S5 的门禁也一样不需要数据库：安全策略只依赖契约与 sqlglot。
+> 只有只读账号的开通 / 验证与两屏对比需要 MySQL（`make stage5-live`）。
 
 > ⚠️ 但“S3 通过”不等于“前端已经能真实问数”。当前 `/api/query` 仍是 S0 的假 SSE，S3 只通过 CLI 调用。详见第 7 节。
 
@@ -478,7 +484,67 @@ S4 的输出只有两种形状：`{"sql": "..."}` 或
 > `REBUILD_LLM_MODEL` 后用 `HttpLlmGenerator`。它产出的 SQL 一样要过静态校验——
 > 换成真模型不会放宽任何一条硬规则。默认路径是确定性生成器，不需要任何配置。
 
-### 2.8 启动开发服务（可选）
+### 2.8 S5：安全边界（不需要三存储）
+
+```bash
+cd "<你的目录>/A020-电商问数智能体实战教程fixed/code/rebuild"
+make stage5
+```
+
+`make stage5` 做四件事：
+
+1. **安全策略门禁**：`python -m app.scripts.security --check`——
+   36 条注入语料必须 **100% 被拒绝**（且原因码精确匹配），11 条正常查询必须
+   **零误杀**，S4 的 10 题基线 SQL 也必须全部通过策略。
+2. **语料判定表**：`python -m app.scripts.security --corpus`——
+   逐条打印「期望 / 实际 / 判定」。
+3. **安全层测试**：词法层、策略每条规则、执行器（假连接）、只读账号、
+   契约 / 代码 / 语料三方对齐、Demo。
+4. **全量后端测试**。
+
+单看一条 SQL 的判定：
+
+```bash
+cd backend
+uv run python -m app.scripts.security --policy "SELECT 1 FROM fact_order; DROP TABLE fact_order"
+# 判定：拒绝（原因码 SQL_MULTIPLE_STATEMENTS）
+```
+
+#### 为什么 S5 不需要数据库
+
+安全策略的输入只有两样：`contracts/schema.contract.yaml`（白名单）和
+`contracts/sql.policy.yaml`（行数上限、超时、禁词、只读账号、错误码）。
+两者都是仓库里的文件，所以门禁在任何一台机器上都给出同样的结果。
+
+#### 需要数据库的部分：只读账号
+
+S5 的底线是**执行器只用一个在 `dw` 上只有 SELECT 的账号**。
+旧系统 `fixtures/dw.sql` 里那句 `GRANT ALL PRIVILEGES ON dw.* TO 'didilili'@'%'`
+正是 D6 能发生的根本原因。
+
+```bash
+# 密码由你给，不在仓库里
+export REBUILD_DW_RO_PASSWORD='<你自己的密码>'
+make stage5-live
+```
+
+它做三件事：
+
+1. `--provision-ro-account`：开通 `dw_reader`（`DROP USER IF EXISTS` +
+   `CREATE USER` + `GRANT SELECT ON dw.*`——权限集合**恰好**是策略声明的那一项）；
+2. `--verify-ro-account`：读 `SHOW GRANTS`，**并且真的去写一次**
+   （`UPDATE ... WHERE 1 = 0`，匹配不到任何行），确认数据库确实拒绝；
+3. `--demo`：两屏对比——同一段 payload，旧系统 `explain {sql}` 校验通过并
+   执行了第二句的 `DROP`，新系统在连库之前就拒绝。
+
+> ℹ️ `--demo` 用的探针表 `_s5_probe` 由它自己建、自己删，被 payload 里的
+> `DROP` 删掉正是要演示的效果——它只影响这一张一次性的表。
+>
+> ⚠️ `--demo` 需要一个**有权限**的账号（默认用 `REBUILD_MYSQL_USER` /
+> `REBUILD_MYSQL_PASSWORD`，即旧系统那个 ALL PRIVILEGES 账号），
+> 因为它要复现旧系统的行为。新系统自己的执行路径用的是 `dw_reader`。
+
+### 2.9 启动开发服务（可选）
 
 只有想看 S0 的假 SSE / 步骤条时才需要。
 
@@ -526,15 +592,19 @@ curl -sS http://127.0.0.1:5273/api/health
 | S2 | `make stage2` | 是 | 三存储构建、manifest、计数对账、`NOOP: 0 writes`；16 测试 |
 | S3 | `make stage3` | 是 | 4 路批量召回 + merge/filter/context；20 题黄金集；38 测试 |
 | S4 | `make stage4` | 否 | 7 个提示词槽位校验 + sqlglot AST 静态校验 + 10 题基线；113 测试 |
+| S5 | `make stage5` | 否 | AST 级安全策略 + 36 条注入语料 100% 拒绝 + 11 条零误杀；173 测试 |
+| S5 实战 | `make stage5-live` | 是（只要 MySQL） | 只读账号开通 / 验证 + 两屏对比（旧执行 / 新拒绝） |
 
 当前测试总数：
 
-- 后端：`19 + 40 + 16 + 38 + 113 = 226`
+- 后端：`19 + 40 + 16 + 38 + 113 + 173 = 399`
 - 前端：`18`
-- 全量后端默认：`198 passed, 28 skipped`（23 条是 S3 真实存储集成测试，
-  5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过）
+- 全量后端默认：`369 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
+  5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过，
+  2 条是 S5 里「这一题是拒答，不产生 SQL」的按需跳过）
 - `make stage3` 的 S3 集成：`38 passed`
 - `make stage4` 的生成层：`108 passed, 5 skipped`
+- `make stage5` 的安全层：`171 passed, 2 skipped`
 
 ---
 
@@ -560,6 +630,14 @@ curl -sS http://127.0.0.1:5273/api/health
 | `REBUILD_EMBEDDING_PROVIDER` | `hash-ngram-v1` | 当前只支持这个值 |
 | `REBUILD_MAX_VALUE_DOCS` | `1000` | 每列最多同步多少值到 ES |
 | `REBUILD_REQUEST_TIMEOUT` | `15` | 外部请求超时（秒） |
+| `REBUILD_DW_RO_PASSWORD` | **无默认** | S5 只读账号（`dw_reader`）的密码——**必须由部署环境提供**，仓库里不存秘密 |
+| `REBUILD_LLM_BASE_URL` | 无 | S4 接真实 LLM 时的 OpenAI 兼容端点 |
+| `REBUILD_LLM_API_KEY` | 无 | 同上 |
+| `REBUILD_LLM_MODEL` | 无 | 同上 |
+
+> `REBUILD_DW_RO_PASSWORD` 没有默认值是**故意的**：只读账号的密码属于秘密，
+> 不进仓库、不进契约、不进任何生成物。缺它时 `make stage5-live` 会**直接报错**，
+> 不会悄悄连成别的账号。
 
 ### 自定义目标时，S2 和 S3 必须用同一组变量
 
@@ -652,6 +730,9 @@ uv run python -m app.build_meta_knowledge --dry-run
 | 前端端口不是 5273 | 5273 被占用，Vite 自动换端口 | 看终端输出；或给 Vite 加 `--strictPort` |
 | `examples` 里没有某个值 | `examples` 只保留排序后前 10 条 | 查契约 `value_domain` / ES / S3 `matched_values` |
 | S3 候选统计和上次不同 | Qdrant 索引重建后调试统计变化 | 看黄金集和最终上下文；`retrieval` 不是契约 |
+| `make stage5-live` 报「缺少环境变量 REBUILD_DW_RO_PASSWORD」 | 只读账号的密码**故意不在仓库里** | `export REBUILD_DW_RO_PASSWORD='<你自己的密码>'` 再跑 |
+| `make stage5-live` 连不上 3306 | MySQL 没起 | 按 2.4 只启动 mysql；`dw` 库要由 `fixtures/dw.sql` 装载 |
+| `make stage5-live` 的 `--demo` 报权限不足 | `--demo` 需要一个有权限的账号来复现旧系统行为 | 确认 `REBUILD_MYSQL_USER` / `REBUILD_MYSQL_PASSWORD` 是那个 ALL PRIVILEGES 账号 |
 
 ---
 
@@ -666,6 +747,12 @@ uv run python -m app.build_meta_knowledge --dry-run
 - S4 的静态校验：每个违规码都有能复现它的负例（多语句 / UPDATE / DELETE /
   DROP / INTO OUTFILE / 未知表 / 未知列 / 常量投影 / NULL 投影 / 缺 ORDER BY /
   缺 LIMIT / 语法错误 / 空 SQL）。
+- `make stage5`：注入语料 36/36 按预期拒绝（原因码精确匹配）+ 零误杀 11/11 +
+  S4 基线 8/8 通过策略；安全层 171 passed / 2 skipped；全量后端 369 passed /
+  30 skipped；PASS。
+- S5 的策略：每个原因码都有能复现它的语料（多语句 / 注释绕过 / 写操作 /
+  集合运算 / 危险函数 / 白名单外表 / 白名单外列）；执行的 SQL 与被校验的 SQL
+  是同一条（去注释 + 自动 LIMIT）。
 - 依赖补全：`make`（winget `ezwinports.make` 4.4.1）、`frontend/node_modules`
   （`npm ci`）、后端新增 `sqlglot`（AST 校验）与 `jsonschema`（输出形状校验）。
 
@@ -695,7 +782,10 @@ uv run python -m app.build_meta_knowledge --dry-run
   前端要能真实问数要等 S6（失败通道）+ S7（前端收口）。
 - S4 的真实 LLM 通路（`HttpLlmGenerator`）：接口与校验都在，但没有对着
   真实端点跑过；默认走的是确定性生成器。
-- S5–S8：不存在。
+- S5 的只读账号与两屏对比（`make stage5-live`）：当前 shell 没有运行中的
+  MySQL，因此**没有**在这里端到端跑过。离线门禁（策略 / 语料 / 零误杀）
+  与执行器、账号的假连接测试都已通过。
+- S6–S8：不存在。
 
 ### ℹ️ 明确的边界
 
@@ -709,16 +799,22 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ## 8. 下一步
 
-当前停点就是 S4。下一步是 **S5：安全边界**：
+当前停点就是 S5。下一步是 **S6：失败通道**：
 
-- `validate_sql` 升级为 AST 级安全策略（白名单、超时、注入语料）；
-- 只读 DB 账号 + 语句超时；
-- 注入语料（多语句 / `SELECT 1; DROP` / UPDATE / UNION 外带 / 注释绕过 /
-  `INTO OUTFILE`）100% 拒绝，错误码 `SQL_REJECTED`。
+- `correct_sql`：最多 1 次重试、**校正后重新校验**、保留原始 SQL、清空旧 `error`；
+- 错误码表：`SQL_REJECTED` / `SQL_SYNTAX` / `SQL_UNKNOWN_COLUMN` / `EMPTY_RESULT` /
+  `LLM_REFUSAL` / `TIMEOUT` / `CANCELLED`（S5 已经把 `SQL_REJECTED` 与
+  `TIMEOUT` 落地了，见 `backend/app/security/executor.py`）；
+- SSE `error` 事件真正可达；前端：失败步骤红叉 + 红框 + 可复制错误；
+- 取消 → `cancelled`（不是 `done`）。
 
-S4 已经把「只读 / 单语句 / 列存在 / 无常量投影 / 排名有 ORDER BY」这五条
-规则做成了代码级守卫（`backend/app/generate/guard.py`），S5 要做的是**再往
-上叠一层安全策略**：白名单、只读账号、超时，以及一整套注入语料。
+S4 已经把「只读 / 单语句 / 列存在 / 无常量投影 / 排名有 ORDER BY」做成代码级
+守卫（`backend/app/generate/guard.py`），S5 又在上面叠了一层**安全策略**
+（`backend/app/security/policy.py`）：白名单、只读账号、超时、自动 LIMIT，
+以及一整套注入语料。
 
-在 S5/S6/S7 落地之前，仍然不要承诺“前端能真实问数”——`/api/query` 至今
+S6 要做的是把它们**接进一条真的链路**：生成 → 策略 → 执行 → 出错 → 校正 →
+再校验 → 再执行，每一种失败都有名字、有 UI、有测试。
+
+在 S6/S7 落地之前，仍然不要承诺“前端能真实问数”——`/api/query` 至今
 还是 S0 的假 SSE。

@@ -18,7 +18,7 @@
 | **S2 元知识构建** | ✅ 完成 | `make stage2` |
 | **S3 检索** | ✅ 完成 | `make stage3` |
 | **S4 生成 SQL** | ✅ 完成 | `make stage4` |
-| S5 安全边界 | ⬜ 待做 | `make stage5` |
+| **S5 安全边界** | ✅ 完成 | `make stage5` |
 | S6 失败通道 | ⬜ 待做 | `make stage6` |
 | S7 前端收口 | ⬜ 待做 | `make stage7` |
 | S8 性能 | ⬜ 待做 | `make stage8` |
@@ -490,7 +490,152 @@ uv run python -m app.scripts.generate --baseline             # 10 题表格
 ### 本次测试
 
 - S4：108 条 + 5 条按需跳过（提示词契约 / 静态校验 / 生成 / 基线 / 三方对齐 / S3→S4 适配）
-- 合计：**226 条**（198 通过 / 28 跳过）；`make stage4` 会跑全量后端测试。
+- S0–S4 合计：**226 条**（198 通过 / 28 跳过）；`make stage4` 会跑全量后端测试。
+
+---
+
+## S5 做了什么
+
+**一句话**：把「只读」从提示词搬进代码——SQL 在**连库之前**就要过 AST 级策略，
+执行用的数据库账号本身**只有 SELECT**。
+
+```
+SQL
+  -> enforce（app/security/policy.py）
+       ① 可执行注释 / 词法禁词    ← 解析器看不见的那些洞
+       ② 单语句                   ← D6 现象 A
+       ③ 只读                     ← D6 现象 B
+       ④ 集合运算 / 危险函数
+       ⑤ 表白名单 / 列白名单        ← 白名单来自契约
+       ⑥ 去注释 + 自动 LIMIT
+  -> ReadOnlyExecutor
+       策略不通过 → 一次数据库往返都没有
+       策略通过   → 只读账号 + max_execution_time + 不许多语句
+  -> ExecutionResult
+```
+
+### 旧系统的两条实测证据
+
+审计 D6（高·安全）在真实 MySQL 上实测过两件事，S5 把它们**原样复现成负例**：
+
+| 旧系统行为 | 实测结果 | 新系统 |
+|---|---|---|
+| `validate()` = `f"explain {sql}"` | `UPDATE` / `DELETE` / `INSERT` **全部通过校验**（MySQL 8.0.18+ 支持 EXPLAIN DML） | `SQL_NOT_READ_ONLY` |
+| `explain {sql}` 只解释第一句 | `SELECT 1; DROP TABLE x` **校验无异常，DROP 真执行了**（DDL 自动提交） | `SQL_MULTIPLE_STATEMENTS` |
+
+这不是推测：`fixtures/injection/sql-injection.yaml` 里每条语料都记着旧系统的
+实测行为与出处（`audit-sql-validation.md` §3.6）。
+
+### 策略的判定顺序是刻意的
+
+**从「解析器看不见的洞」开始查**，因为那些地方 AST 根本给不出结论：
+
+| 原因码 | 判定 |
+|---|---|
+| `SQL_COMMENT_OBFUSCATION` | 含 MySQL 可执行注释 `/*! ... */`——服务端会执行它，sqlglot 会忽略它 |
+| `SQL_NOT_READ_ONLY` | 写操作关键字 / 写节点 / 根节点不是 SELECT / `INTO OUTFILE` |
+| `SQL_MULTIPLE_STATEMENTS` | 解析出不止一条语句 |
+| `SQL_FORBIDDEN_CONSTRUCT` | 集合运算（UNION）、`SLEEP` / `BENCHMARK` / `LOAD_FILE` 等 |
+| `SQL_TABLE_NOT_ALLOWED` | 表或库不在契约白名单里（含 `information_schema` / `mysql`） |
+| `SQL_COLUMN_NOT_ALLOWED` | 列不在契约白名单里 |
+| `SQL_SYNTAX` / `SQL_EMPTY` | 解析不了 / 空 |
+
+对外只暴露**一个**通道码 `SQL_REJECTED`，具体原因放在 `reason_code` 里——
+失败只有一种表达方式（审计根因 B）。
+
+### 白名单不手抄第二份
+
+策略的表 / 列白名单由 `contracts/schema.contract.yaml` **派生**
+（`SqlWhitelist.from_catalog`），不在 `sql.policy.yaml` 里再抄一遍。
+约束 3 说「schema 单一事实源，禁止手写第二份」——这里照做。
+
+`sql.policy.yaml` 只声明**安全参数**：行数上限、超时、禁词、只读账号、错误码。
+而且有一条测试盯着：**这些参数不能在代码里再写一遍**（`test_policy_alignment.py`
+用 AST 扫常量），否则契约改了门禁还在绿。
+
+### 执行的就是被校验的那条
+
+策略最后把 AST **重新序列化**：注释被剥掉、LIMIT 被补上或截断。执行器跑的是
+这个产物，不是原始文本——否则「校验的那条」和「跑的那条」就会是两条语句，
+D6 的漏洞换个地方复发。
+
+```
+输入： SELECT SUM(fact_order.order_amount) FROM fact_order
+执行： SELECT SUM(fact_order.order_amount) FROM fact_order LIMIT 1000
+```
+
+### 四道闸
+
+| 闸 | 在哪 | 作用 |
+|---|---|---|
+| 策略 | `app/security/policy.py` | 拒绝危险 SQL（且**不连库**） |
+| 只读账号 | `app/security/account.py` | 账号在 `dw` 上只有 SELECT——旧账号是 `GRANT ALL PRIVILEGES` |
+| 语句超时 | `max_execution_time` + socket 读超时 | 一条没有 LIMIT 的全表扫描不该拖死服务 |
+| 不许多语句 | 连接标志去掉 `CLIENT_MULTI_STATEMENTS` | 即使策略被绕过，一条连接也只跑一条语句 |
+
+只读账号**不存密码在仓库里**（`REBUILD_DW_RO_PASSWORD` 由部署环境提供），
+开通语句是 `DROP USER IF EXISTS` + `CREATE USER` + `GRANT SELECT`——所以它的
+权限集合**恰好**是策略声明的那一项，不会攒下以前的 `INSERT`。
+
+验证账号时**真的去写一次**（`UPDATE ... WHERE 1 = 0`，匹配不到任何行），
+而不是只读 `SHOW GRANTS`：第 1 步是读权限表，第 2 步是问数据库「你到底
+让不让我写」。
+
+### 注入语料
+
+`fixtures/injection/sql-injection.yaml`：**36 条必须拒绝** + **11 条必须放行**。
+
+```
+拒绝：多语句 3 · 注释绕过 2 · 写操作 18 · 集合运算与危险函数 8 · 白名单外 5
+放行：聚合 / JOIN / GROUP BY / 中文别名 ORDER BY / 子查询 / 字符串里的分号 …
+```
+
+`allow` 段是**零误杀**语料——它们长得像正常查询，必须全部通过。语料还钉住了
+「不能退化」：条目数下限、每条禁用关键字至少被一条语料覆盖、每条语料都必须
+记录旧系统的行为与出处。
+
+### 两屏对比
+
+`make stage5-live` 会真的按**旧系统的方式**跑一遍（`explain {sql}` 然后直接
+执行），用一张一次性的探针表 `_s5_probe` 证明两件事：
+
+```
+【旧系统】校验结果：通过（没有抛出任何异常）
+         第二句真的执行了：是（探针表 已被 DROP）
+【新系统】判定：拒绝（原因码 SQL_MULTIPLE_STATEMENTS）
+         探针表：还在（数据库没被碰过）
+```
+
+### S5 的门禁不需要 MySQL
+
+策略只依赖契约与 sqlglot，所以 `make stage5` 在一台**没有 Docker、没有数据库、
+没有网络**的机器上就能跑完并给出同样结果。只读账号的开通与验证、两屏对比需要
+MySQL，放在 `make stage5-live` 里。
+
+### 命令
+
+```bash
+make stage5
+
+# 或者逐步看
+cd backend
+uv run python -m app.scripts.security --check      # 注入语料 100% 拒绝 + 零误杀
+uv run python -m app.scripts.security --corpus      # 语料判定表
+uv run python -m app.scripts.security --policy "SELECT 1; DROP TABLE x"   # 单条判定
+uv run pytest -q tests/security                    # 171 条（+ 2 条跳过）
+```
+
+需要 MySQL 的部分：
+
+```bash
+export REBUILD_DW_RO_PASSWORD=...          # 只读账号密码，不在仓库里
+make stage5-live                            # 开通 + 验证 + 两屏对比
+```
+
+### 本次测试
+
+- S5：171 条 + 2 条按需跳过（词法层 / 策略 / 语料 / 零误杀 / 执行器 / 账号 / 对齐 / Demo）
+- 合计：**369 条**（369 通过 / 30 跳过）；`make stage5` 会跑全量后端测试。
 
 ---
 
@@ -518,6 +663,8 @@ make stage1           # S1：契约绿 + 负向夹具红 + 后端 S0/S1 测试�
 make stage2           # S2：dry-run + --fresh + --verify + 幂等（需要 MySQL/ES/Qdrant）
 make stage3           # S3：S2 对账 + 20 题黄金集 + CLI YAML + 全部后端测试
 make stage4           # S4：10 题基线 + 生成层测试 + 全部后端测试（不需要 MySQL/Docker）
+make stage5           # S5：注入语料 100% 拒绝 + 零误杀 + 全部后端测试（不需要 MySQL）
+make stage5-live      # S5 实战：开通只读账号 + 验证它写不了 + 两屏对比（需要 MySQL）
 make baseline         # 只看 S4 的基线表格：问题 / SQL / 判定
 ```
 
@@ -527,6 +674,10 @@ make baseline         # 只看 S4 的基线表格：问题 / SQL / 判定
 >
 > `make stage4` **不需要**任何外部服务：上下文由契约离线裁剪，基线因此可以在
 > 任何一台机器上复现同样的结果。
+>
+> `make stage5` 同样**不需要**数据库：安全策略只依赖契约与 sqlglot。
+> `make stage5-live` 才需要 MySQL，并且需要环境变量 `REBUILD_DW_RO_PASSWORD`
+> （只读账号的密码不在仓库里）。
 
 > **Windows**：控制台默认代码页是 GBK，中文与 `↔` 之类符号会触发
 > `UnicodeEncodeError`，导致 `make stage1` 直接崩。CLI 内部已经把 stdout/stderr
@@ -544,26 +695,32 @@ rebuild/
 │   ├── sse.schema.json     # 三种 SSE 事件
 │   ├── schema.contract.yaml # S1：5 表 / 24 列 / 6 指标的语义契约
 │   ├── sql.output.schema.json # S4：sql_or_refusal + 拒答码表
+│   ├── sql.policy.yaml     # S5：安全策略（行数上限/超时/禁词/只读账号/错误码）
 │   └── prompts/            # S4：7 个提示词（frontmatter 声明槽位 + 输出 schema）
 ├── fixtures/               # S1 冻结数据与负向夹具（不依赖旧项目）
 │   ├── dw.sql              # 物理 DDL + 115 单真实数据
-│   └── legacy/             # 旧 meta_config.yaml + 功能清单（必须红）
+│   ├── legacy/             # 旧 meta_config.yaml + 功能清单（必须红）
+│   └── injection/          # S5：36 条必须拒绝 + 11 条必须放行的注入语料
 ├── docs/
 │   ├── SCHEMA-CONTRACT.md  # 由契约自动生成（--write-doc）
 │   └── screenshots/
 ├── backend/
 │   ├── app/main.py         # S0 假流 + /api/steps
 │   ├── app/cli.py          # CLI 公共入口（stdout 固定 UTF-8）
+│   ├── app/sqllex.py       # S4/S5 共用词法层（注释/字面量/关键字）
 │   ├── app/schema_contract.py # S1 检查器 + 文档生成器 + CLI
 │   ├── app/build_meta_knowledge.py # S2 CLI
 │   ├── app/build/          # S2 计划/embedding/三存储/manifest
 │   ├── app/recall/         # S3 关键词/批量召回/合并过滤/YAML
 │   ├── app/generate/       # S4 上下文/提示词/生成器/静态校验/编排
+│   ├── app/security/       # S5 策略/执行器/只读账号/注入语料/Demo
 │   ├── app/scripts/recall.py # S3 CLI（stdout YAML + stderr 统计）
 │   ├── app/scripts/generate.py # S4 CLI（YAML / --baseline 表格）
-│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 + S4 113 = 226 条
+│   ├── app/scripts/security.py # S5 CLI（--check / --corpus / --policy / --demo）
+│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 + S4 113 + S5 173 = 399 条
 │       ├── recall/         # 20 题黄金集 + 关键词/渲染/往返测试
-│       └── generate/       # 10 题基线 + 提示词/静态校验/三方对齐测试
+│       ├── generate/       # 10 题基线 + 提示词/静态校验/三方对齐测试
+│       └── security/       # 词法/策略/语料/零误杀/执行器/账号/对齐/Demo
 ├── frontend/
 │   ├── src/App.tsx
 │   ├── src/lib/api.ts                # 运行时类型守卫 + SSE 解析器
