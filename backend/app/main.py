@@ -152,8 +152,8 @@ def create_app(runner_factory: RunnerFactory) -> FastAPI:
     """
     application = FastAPI(
         title="Shopkeeper Agent · Rebuild",
-        version="0.2.0",
-        description="S6：契约驱动的问数流水线 + 有名字的失败通道",
+        version="0.3.0",
+        description="S7：契约驱动的问数流水线 + 生成式前端契约 + 有名字的失败通道",
     )
 
     # 前端开发服务器（rebuild 用 5273，避开旧栈的 5173）
@@ -169,7 +169,7 @@ def create_app(runner_factory: RunnerFactory) -> FastAPI:
 
     @application.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "stage": "S6"}
+        return {"status": "ok", "stage": "S7"}
 
     @application.get("/api/steps", response_model=StepsResponse)
     def get_steps() -> StepsResponse:
@@ -248,7 +248,14 @@ app = create_app(default_runner_factory)
 
 
 def _sse(event: dict) -> str:
-    """把事件编码成 SSE 帧。前端按空行切分。"""
+    """把事件编码成 SSE 帧。前端按空行切分。
+
+    这里**故意不传 `default=str`**。
+    """
+    # 旧系统传了 `default=str`，于是 `Decimal` 静悄悄变成字符串 "10"，
+    # 数字与字符串在同一行里混列（审计 B4）。现在值在进 JSON 之前就被
+    # `app.agent.values` 归一化过了；万一还有漏网的类型，就让它**炸**
+    # ——变成一条 INTERNAL_ERROR，好过悄悄改掉用户数据的类型。
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 

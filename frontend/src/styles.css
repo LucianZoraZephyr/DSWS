@@ -394,6 +394,77 @@ tbody tr:hover td {
   color: var(--ink);
 }
 
+/* ---------------- 结果块（S7）---------------- */
+
+.result-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.result-note {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px dashed #d8cdb8;
+  border-radius: 10px;
+  background: #fdfaf2;
+  color: #8a6a20;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.result-hint {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* 整列都是 NULL：列头弱化 + 一个「无数据」标记。 */
+.col-all-null {
+  color: #b0a795;
+}
+
+.col-flag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 0.75;
+}
+
+.col-flag--warn {
+  color: var(--tomato);
+  opacity: 1;
+}
+
+/* 字符串形式的数字：等宽 + 下划虚线，提醒它不是数字。 */
+.cell-numeric-string {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.notice {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid #dcc48d;
+  border-radius: 10px;
+  background: var(--brass-soft);
+  color: #7a5713;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* ---------------- errors ---------------- */
 
 .error-card {

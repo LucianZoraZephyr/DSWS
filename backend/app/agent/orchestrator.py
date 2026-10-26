@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Callable, Iterator, Protocol
 
 from app.agent.cancel import CancelToken
@@ -38,6 +39,7 @@ from app.agent.errors import (
     load_error_table,
 )
 from app.agent.validate import DEFAULT_GATES, validate_sql
+from app.agent.values import normalize_cell
 from app.generate.context import OfflineContextBuilder
 from app.generate.models import GenerateContext
 from app.generate.pipeline import draft_sql
@@ -64,12 +66,17 @@ class SqlExecutor(Protocol):
 
 
 def _cell_type(value: Any) -> str:
-    """单元格类型 → `contracts/sse.schema.json` 里的枚举。"""
+    """单元格类型 → `contracts/sse.schema.json` 里的枚举。
+
+    类型是**从原始值**推出来的（不是从归一化后的值）：`Decimal` 推出来
+    是 `number`，`date` 推出来是 `date`——哪怕归一化之后它变成了字符串。
+    前端照着这个类型渲染，所以类型必须说的是「这个值本来是什么」。
+    """
     if value is None:
         return "null"
     if isinstance(value, bool):
         return "boolean"
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float, Decimal)):
         return "number"
     if isinstance(value, (datetime, date)):
         return "date"
@@ -83,14 +90,19 @@ def to_result_payload(execution: ExecutionResult) -> dict[str, Any]:
     里的 `rows` 是二维数组，不是对象数组。
 
     列类型从**这一列第一个非空值**推断：整列都是 NULL 时才是 `null`。
+
+    值在进 JSON 之前**归一化**（`app.agent.values`）：`Decimal` 保持数字，
+    `date` 变成 ISO 8601 字符串。旧系统在这里用 `default=str` 把两者
+    都降级成字符串，数字与字符串在同一行里混列——那正是审计 B4 记的
+    「类型被悄悄改写」。
     """
     columns = list(execution.columns)
-    rows: list[list[Any]] = []
+    raw_rows: list[list[Any]] = []
     for row in execution.rows:
-        rows.append([row.get(name) for name in columns])
+        raw_rows.append([row.get(name) for name in columns])
 
     def column_type(index: int) -> str:
-        for row in rows:
+        for row in raw_rows:
             value = row[index]
             if value is not None:
                 return _cell_type(value)
@@ -101,7 +113,7 @@ def to_result_payload(execution: ExecutionResult) -> dict[str, Any]:
             {"name": name, "type": column_type(index)}
             for index, name in enumerate(columns)
         ],
-        "rows": rows,
+        "rows": [[normalize_cell(value) for value in row] for row in raw_rows],
     }
 
 

@@ -1,0 +1,10 @@
+{
+  "id": "null_column",
+  "title": "整列都是 NULL",
+  "source": "handwritten",
+  "note": "整列都没有非空值时，列类型会被推成 null。旧前端把这种列画得和普通列一样，用户分不清「这一列是 0」还是「这一列根本没取到数据」（审计 F6）。这条流只能手写：场景夹具里的结果都是真有值的。",
+  "delay_before_last_ms": 0,
+  "frames": [
+    "data: {\"type\": \"result\", \"data\": {\"columns\": [{\"name\": \"地区\", \"type\": \"string\"}, {\"name\": \"退款额\", \"type\": \"null\"}], \"rows\": [[\"华北\", null], [\"华南\", null]]}}\n\n"
+  ]
+}

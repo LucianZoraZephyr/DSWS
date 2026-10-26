@@ -1,0 +1,11 @@
+{
+  "id": "cancelled",
+  "title": "用户取消",
+  "source": "recorded",
+  "note": "取消开关在第一个步骤边界就被拉下时，后端发出的那一条事件。",
+  "delay_before_last_ms": 0,
+  "frames": [
+    "data: {\"type\": \"progress\", \"step\": \"correct_sql\", \"status\": \"skipped\", \"duration_ms\": null}",
+    "data: {\"type\": \"error\", \"code\": \"CANCELLED\", \"class\": \"cancelled\", \"message\": \"本次问数已被用户取消。\", \"step\": null, \"detail\": {}}"
+  ]
+}

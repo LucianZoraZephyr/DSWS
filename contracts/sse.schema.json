@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://shopkeeper.local/contracts/sse.schema.json",
   "title": "问数 SSE 事件",
-  "description": "后端每条形如 `data: <json>\\n\\n`。前端只认这三种事件，未知事件必须报错而不是静默忽略。",
+  "description": "后端每条形如 `data: <json>\\n\\n`。契约只约束这三种事件；前端遇到未知的 type 必须忽略并留一条记录，而不是当成一次失败（后端加事件类型不该让用户看到红框）。",
   "oneOf": [
     { "$ref": "#/$defs/progress" },
     { "$ref": "#/$defs/result" },

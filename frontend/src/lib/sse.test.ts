@@ -26,9 +26,12 @@ const error = {
   step: "validate_sql",
 } as const;
 
-function collect(chunks: string[]): AgentEvent[] {
+function collect(
+  chunks: string[],
+  onUnknownType?: (type: string) => void,
+): AgentEvent[] {
   const events: AgentEvent[] = [];
-  const parser = new SseParser((event) => events.push(event));
+  const parser = new SseParser((event) => events.push(event), onUnknownType);
   for (const chunk of chunks) parser.feed(chunk);
   parser.flush();
   return events;
@@ -40,16 +43,27 @@ function frame(value: unknown): string {
 
 describe("parseAgentEvent", () => {
   it("接受合法的 progress / result / error", () => {
-    expect(parseAgentEvent(progress)).toEqual(progress);
-    expect(parseAgentEvent(result)).toEqual(result);
-    expect(parseAgentEvent(error)).toEqual(error);
+    for (const event of [progress, result, error]) {
+      const parsed = parseAgentEvent(event);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(parsed.event).toEqual(event);
+    }
+  });
+
+  it("校验的是契约本身：字段不对就拒绝", () => {
+    // success 必须带 duration_ms
+    const parsed = parseAgentEvent({
+      type: "progress",
+      step: "run_sql",
+      status: "success",
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok && parsed.kind === "invalid") {
+      expect(parsed.message).toContain("duration_ms");
+    }
   });
 
   it.each([
-    [
-      "success 缺少 duration_ms",
-      { type: "progress", step: "run_sql", status: "success" },
-    ],
     [
       "success 的 duration_ms 为 null",
       { type: "progress", step: "run_sql", status: "success", duration_ms: null },
@@ -63,82 +77,78 @@ describe("parseAgentEvent", () => {
       { type: "progress", step: "correct_sql", status: "skipped", duration_ms: 0 },
     ],
     [
-      "error 的 duration_ms 为负数",
+      "duration_ms 为负数",
       { type: "progress", step: "run_sql", status: "error", duration_ms: -1 },
     ],
   ])("拒绝非法 duration：%s", (_name, event) => {
-    expect(() => parseAgentEvent(event)).toThrow(ApiError);
+    const parsed = parseAgentEvent(event);
+    expect(parsed.ok).toBe(false);
   });
 
-  it("拒绝未知事件类型，错误码为 UNKNOWN_EVENT", () => {
-    try {
-      parseAgentEvent({ type: "bogus" });
-      expect.unreachable("应当抛错");
-    } catch (reason) {
-      expect(reason).toBeInstanceOf(ApiError);
-      expect((reason as ApiError).code).toBe("UNKNOWN_EVENT");
+  it("未知事件类型**不是**失败，而是「契约长了一条腿」", () => {
+    // 这是审计 F3：旧系统把任何未知 type 当成 error，于是后端一升级，
+    // 用户就看到一次莫名的失败。
+    const parsed = parseAgentEvent({ type: "bogus" });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.kind).toBe("unknown_type");
+      if (parsed.kind === "unknown_type") expect(parsed.type).toBe("bogus");
     }
   });
 
   it("拒绝未知 status", () => {
-    expect(() =>
-      parseAgentEvent({
-        type: "progress",
-        step: "run_sql",
-        status: "finished",
-        duration_ms: null,
-      }),
-    ).toThrow(/未知的 progress.status/);
+    const parsed = parseAgentEvent({
+      type: "progress",
+      step: "run_sql",
+      status: "finished",
+      duration_ms: null,
+    });
+    expect(parsed.ok).toBe(false);
   });
 
   it("拒绝缺少 step 的 error", () => {
-    expect(() =>
-      parseAgentEvent({
-        type: "error",
-        code: "X",
-        class: "failure",
-        message: "y",
-      }),
-    ).toThrow(/error.step/);
+    const parsed = parseAgentEvent({
+      type: "error",
+      code: "X",
+      class: "failure",
+      message: "y",
+    });
+    expect(parsed.ok).toBe(false);
   });
 
   it("拒绝缺少 class 的 error", () => {
     // class 决定界面怎么渲染：红框 / 空态 / 取消。少了它，失败就只剩
     // 一种长相——那正是旧系统的毛病。
-    expect(() =>
-      parseAgentEvent({ type: "error", code: "X", message: "y", step: null }),
-    ).toThrow(/error.class/);
+    const parsed = parseAgentEvent({
+      type: "error",
+      code: "X",
+      message: "y",
+      step: null,
+    });
+    expect(parsed.ok).toBe(false);
   });
 
   it("拒绝未知的 class", () => {
-    expect(() =>
-      parseAgentEvent({
-        type: "error",
-        code: "X",
-        class: "boom",
-        message: "y",
-        step: null,
-      }),
-    ).toThrow(/未知的 error.class/);
+    const parsed = parseAgentEvent({
+      type: "error",
+      code: "X",
+      class: "boom",
+      message: "y",
+      step: null,
+    });
+    expect(parsed.ok).toBe(false);
   });
 
   it("接受三种 class", () => {
     for (const klass of ["failure", "empty", "cancelled"]) {
-      expect(
-        parseAgentEvent({
-          type: "error",
-          code: "X",
-          class: klass,
-          message: "y",
-          step: null,
-        }),
-      ).toEqual({
+      const parsed = parseAgentEvent({
         type: "error",
         code: "X",
         class: klass,
         message: "y",
         step: null,
       });
+      expect(parsed.ok).toBe(true);
     }
   });
 
@@ -155,42 +165,63 @@ describe("parseAgentEvent", () => {
         attempts: 1,
       },
     });
-    expect(parsed).toMatchObject({
-      detail: {
-        reason_code: "SQL_FORBIDDEN_CONSTRUCT",
-        original_sql: "SELECT 1",
-        attempts: 1,
-      },
-    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.event).toMatchObject({
+        detail: {
+          reason_code: "SQL_FORBIDDEN_CONSTRUCT",
+          original_sql: "SELECT 1",
+          attempts: 1,
+        },
+      });
+    }
   });
 
   it("拒绝未定义的细节字段", () => {
-    expect(() =>
-      parseAgentEvent({
-        type: "error",
-        code: "X",
-        class: "failure",
-        message: "y",
-        step: null,
-        detail: { nope: 1 },
-      }),
-    ).toThrow(/未定义的键/);
+    const parsed = parseAgentEvent({
+      type: "error",
+      code: "X",
+      class: "failure",
+      message: "y",
+      step: null,
+      detail: { nope: 1 },
+    });
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("拒绝多出来的顶层字段", () => {
+    const parsed = parseAgentEvent({ ...progress, extra: 1 });
+    expect(parsed.ok).toBe(false);
   });
 
   it("拒绝非法列类型与非法单元格", () => {
-    expect(() =>
+    expect(
       parseAgentEvent({
         type: "result",
         data: { columns: [{ name: "x", type: "object" }], rows: [] },
-      }),
-    ).toThrow(/columns\[0\]/);
+      }).ok,
+    ).toBe(false);
 
-    expect(() =>
+    expect(
       parseAgentEvent({
         type: "result",
         data: { columns: [{ name: "x", type: "string" }], rows: [[{}]] },
-      }),
-    ).toThrow(/rows\[0\]/);
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("接受数字与字符串混列的行（类型保真靠值，不靠猜）", () => {
+    const parsed = parseAgentEvent({
+      type: "result",
+      data: {
+        columns: [
+          { name: "销量", type: "number" },
+          { name: "地区", type: "string" },
+        ],
+        rows: [[10, "华北"]],
+      },
+    });
+    expect(parsed.ok).toBe(true);
   });
 });
 
@@ -240,5 +271,15 @@ describe("SseParser", () => {
       progress,
       result,
     ]);
+  });
+
+  it("未知事件类型被忽略，只留一条记录", () => {
+    const seen: string[] = [];
+    const events = collect(
+      [frame({ type: "meta", note: "后端新增的事件" }) + frame(result)],
+      (type) => seen.push(type),
+    );
+    expect(events).toEqual([result]);
+    expect(seen).toEqual(["meta"]);
   });
 });

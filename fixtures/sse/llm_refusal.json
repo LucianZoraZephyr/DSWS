@@ -1,0 +1,29 @@
+{
+  "id": "llm_refusal",
+  "title": "模型明确拒答",
+  "source": "recorded",
+  "note": "从场景应用录下的真实字节流（模型与数据库是替身，其余全真）。",
+  "delay_before_last_ms": 0,
+  "frames": [
+    "data: {\"type\": \"progress\", \"step\": \"extract_keywords\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"extract_keywords\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"recall_column\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"recall_column\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"recall_value\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"recall_value\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"recall_metric\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"recall_metric\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"merge_retrieved_info\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"merge_retrieved_info\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"filter_table\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"filter_table\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"filter_metric\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"filter_metric\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"add_extra_context\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"add_extra_context\", \"status\": \"success\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"generate_sql\", \"status\": \"running\", \"duration_ms\": null}",
+    "data: {\"type\": \"progress\", \"step\": \"generate_sql\", \"status\": \"error\", \"duration_ms\": 12.5}",
+    "data: {\"type\": \"progress\", \"step\": \"correct_sql\", \"status\": \"skipped\", \"duration_ms\": null}",
+    "data: {\"type\": \"error\", \"code\": \"LLM_REFUSAL\", \"class\": \"failure\", \"message\": \"数据只覆盖 20250101 ~ 20250331，问题里的 2024 年超出数据边界。\", \"step\": \"generate_sql\", \"detail\": {\"reason_code\": \"OUT_OF_RANGE\"}}"
+  ]
+}

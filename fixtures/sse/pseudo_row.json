@@ -1,0 +1,10 @@
+{
+  "id": "pseudo_row",
+  "title": "伪 SQL 当数据行（旧系统的静默失败）",
+  "source": "handwritten",
+  "note": "旧系统的 LLM 编出 SELECT '无法生成SQL…' AS error_message，这条 SQL 能过 EXPLAIN，于是被当成一行正常数据发回来。新后端会在校验阶段拒掉它（S4 拒绝常量投影），但前端必须有兜底：界面不能把失败画成一张成功的表。",
+  "delay_before_last_ms": 0,
+  "frames": [
+    "data: {\"type\": \"result\", \"data\": {\"columns\": [{\"name\": \"error_message\", \"type\": \"string\"}], \"rows\": [[\"无法生成SQL：请补充时间范围后再试。\"]]}}\n\n"
+  ]
+}

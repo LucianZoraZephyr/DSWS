@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live stage6 stage6-ui baseline
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live stage6 stage6-ui stage7 stage7-ui baseline
 
 install:
 	cd backend && uv sync --frozen
@@ -131,3 +131,26 @@ stage6:
 # 场景应用与生产应用共用同一套 HTTP / SSE 管道，只替换模型与数据库。
 stage6-ui:
 	./scripts/stage6-ui.sh
+
+# S7 硬验收：契约生成物新鲜度 + SSE 夹具对账 + 前端契约测试 + 类型检查/构建
+# 前置：**不需要** MySQL / LLM / 浏览器。浏览器用例拆到 stage7-ui（沿用
+# stageN / stageN-ui 的既有惯例，S0 / S6 都是这么做的）。
+stage7:
+	@echo "== S7 · 契约生成物新鲜度 =="
+	cd backend && uv run python -m app.scripts.contracts_gen --check
+	@echo "== S7 · SSE 夹具与真实输出一致 =="
+	cd backend && uv run python -m app.scripts.record_sse --check
+	@echo "== S7 · 前端契约测试 =="
+	cd backend && uv run pytest -q tests/frontend
+	@echo "== S7 · 前端协议单测 =="
+	cd frontend && npm run test
+	@echo "== S7 · 前端类型检查 + 构建 =="
+	cd frontend && npm run build
+	@echo "== S7 · 全部后端测试（S0 … S7） =="
+	cd backend && uv run pytest -q
+	@echo "S7 PASS"
+
+# S7 浏览器验收：13 条 F 缺陷各一个用例（回放服务器 + 隔离前端）
+# 前置：需要 Chrome / Edge（Windows 上用 Edge 也行）。
+stage7-ui:
+	./scripts/stage7-ui.sh

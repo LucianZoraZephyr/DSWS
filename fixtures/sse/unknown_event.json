@@ -1,0 +1,11 @@
+{
+  "id": "unknown_event",
+  "title": "契约之外的事件类型",
+  "source": "handwritten",
+  "note": "后端将来加一个新事件类型。前端必须**忽略**它并继续跑，而不是把它当成失败（旧系统的兜底分支就是这么错的）。",
+  "delay_before_last_ms": 0,
+  "frames": [
+    "data: {\"type\": \"meta\", \"note\": \"后端新增的事件类型\"}\n\n",
+    "data: {\"type\": \"result\", \"data\": {\"columns\": [{\"name\": \"地区\", \"type\": \"string\"}, {\"name\": \"销售额\", \"type\": \"number\"}], \"rows\": [[\"华北\", 128400]]}}\n\n"
+  ]
+}

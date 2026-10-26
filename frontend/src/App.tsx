@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import Composer from "./components/Composer";
 import ErrorCard from "./components/ErrorCard";
+import PseudoErrorCard from "./components/PseudoErrorCard";
 import ResultTable from "./components/ResultTable";
 import StepRail from "./components/StepRail";
 import {
@@ -10,7 +11,9 @@ import {
   streamQuery,
   cancelQuery,
   ApiError,
+  isAbortError,
 } from "./lib/api";
+import { looksLikePseudoError } from "./lib/result";
 import type {
   AgentEvent,
   ErrorCodeSpec,
@@ -64,6 +67,7 @@ export default function App() {
   const [errorSpecs, setErrorSpecs] = useState<
     Record<string, ErrorCodeSpec>
   >({});
+  const [unknownTypes, setUnknownTypes] = useState<string[]>([]);
 
   const controllerRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
@@ -117,6 +121,7 @@ export default function App() {
     setStates({});
     setResult(null);
     setError(null);
+    setUnknownTypes([]);
     setLastQuery(query);
 
     let terminal = false;
@@ -127,47 +132,64 @@ export default function App() {
         (event: AgentEvent) => {
           if (terminal) return;
 
-          if (event.type === "progress") {
-            if (!steps.some((step) => step.id === event.step)) {
-              throw new ApiError("UNKNOWN_STEP", `未知步骤：${event.step}`);
+          // 用 switch，不用「progress / result / 其余全当 error」。
+          //
+          // 旧系统的兜底分支把**任何**未知事件类型都当成失败：后端将来
+          // 加一个 `type:"meta"`，用户就会看到一次莫名的失败，而红框还
+          // 不显示（message 是 undefined）。契约长了一条腿，不该变成报错。
+          switch (event.type) {
+            case "progress": {
+              if (!steps.some((step) => step.id === event.step)) {
+                throw new ApiError("UNKNOWN_STEP", `未知步骤：${event.step}`);
+              }
+              setStates((previous) => ({
+                ...previous,
+                [event.step]: {
+                  status: event.status,
+                  duration_ms: event.duration_ms,
+                },
+              }));
+              return;
             }
-            setStates((previous) => ({
-              ...previous,
-              [event.step]: {
-                status: event.status,
-                duration_ms: event.duration_ms,
-              },
-            }));
-            return;
-          }
 
-          if (event.type === "result") {
-            terminal = true;
-            setResult(event.data);
-            setStatus("done");
-            return;
-          }
+            case "result": {
+              terminal = true;
+              setResult(event.data);
+              setStatus("done");
+              return;
+            }
 
-          // error 事件：三种类别三种处理。
-          terminal = true;
-          setError(event);
-          if (event.class === "empty") {
-            // 合法但没有数据：不算失败，步骤也不标红。
-            setStatus("empty");
-            return;
+            case "error": {
+              // error 事件：三种类别三种处理。
+              terminal = true;
+              setError(event);
+              if (event.class === "empty") {
+                // 合法但没有数据：不算失败，步骤也不标红。
+                setStatus("empty");
+                return;
+              }
+              if (event.class === "cancelled") {
+                setStatus("cancelled");
+                setStates((previous) => markRunning(previous, "cancelled"));
+                return;
+              }
+              setStatus("error");
+              setStates((previous) => markRunning(previous, "error", event.step));
+              return;
+            }
           }
-          if (event.class === "cancelled") {
-            setStatus("cancelled");
-            setStates((previous) => markRunning(previous, "cancelled"));
-            return;
-          }
-          setStatus("error");
-          setStates((previous) => markRunning(previous, "error", event.step));
         },
         {
           signal: controller.signal,
           onRequestId: (requestId) => {
             requestIdRef.current = requestId;
+          },
+          onUnknownType: (type) => {
+            // 后端加了新事件类型：记一笔，继续跑。
+            console.warn(`[契约] 收到未知事件类型：${type}（已忽略）`);
+            setUnknownTypes((previous) =>
+              previous.includes(type) ? previous : [...previous, type],
+            );
           },
         },
       );
@@ -186,7 +208,7 @@ export default function App() {
         setStates((previous) => markRunning(previous, "error"));
       }
     } catch (reason: unknown) {
-      if (isAbort(reason)) {
+      if (isAbortError(reason)) {
         // 用户点了停止：状态是「已取消」，**不是** done。
         setStatus("cancelled");
         setStates((previous) => markRunning(previous, "cancelled"));
@@ -225,6 +247,10 @@ export default function App() {
     setStates((previous) => markRunning(previous, "cancelled"));
   }
 
+  // 「伪 SQL 当数据行」：后端把失败编成了一行数据。
+  // 止损——不把它画成一张成功的表。
+  const pseudoError = result ? looksLikePseudoError(result) : null;
+
   return (
     <div className="app">
       <header className="masthead">
@@ -232,11 +258,11 @@ export default function App() {
           <p className="eyebrow">从零重建 · 教学版</p>
           <h1>电商问数智能体</h1>
           <p className="subtitle">
-            契约先行：步骤目录唯一源 · SSE 事件过 Schema · 每一种失败都有名字
+            契约先行：类型从契约生成 · 步骤目录唯一源 · 每一种失败都有名字
           </p>
         </div>
         <div className="badges">
-          <span className="badge badge-stage">S6 失败通道</span>
+          <span className="badge badge-stage">S7 契约驱动前端</span>
           <span className="badge">{steps.length} 步</span>
           <span className="badge">{conditionalCount} 条件步</span>
           <span className="badge" data-testid="run-status">
@@ -251,6 +277,13 @@ export default function App() {
           <p>{loadError}</p>
           <p className="hint">请确认后端已在 8100 端口启动。</p>
         </div>
+      )}
+
+      {unknownTypes.length > 0 && (
+        <p className="notice" data-testid="unknown-type-notice">
+          收到契约之外的事件类型（{unknownTypes.join("、")}），已忽略。
+          前端不需要升级也能继续用——这是「契约长了一条腿」的正确反应。
+        </p>
       )}
 
       <main className="layout">
@@ -275,15 +308,16 @@ export default function App() {
           <div className="chat-body">
             {!lastQuery && (
               <div className="empty-state">
-                <p className="empty-title">失败也要有名字。</p>
+                <p className="empty-title">类型从契约生成，不从记忆硬编码。</p>
                 <p>
-                  这一版把「只读」与「只查得到」都搬进了代码：
-                  <strong>每一次失败都有错误码、有界面、有测试。</strong>
+                  事件的每一个字段都来自
+                  <strong>contracts/sse.schema.json</strong>：
+                  <strong>改了契约，重新生成，界面跟着变。</strong>
                 </p>
                 <ul>
                   <li>步骤列表由后端下发，前端零硬编码</li>
-                  <li>每条事件都通过 contracts/sse.schema.json</li>
-                  <li>6 类失败各有各的样子，取消不是「完成」</li>
+                  <li>每条事件都通过契约校验，未知类型被忽略而不是当成失败</li>
+                  <li>数字就是数字：Decimal 不再变成字符串</li>
                 </ul>
               </div>
             )}
@@ -299,7 +333,14 @@ export default function App() {
               </div>
             )}
 
-            {result && <ResultTable data={result} />}
+            {result && pseudoError && (
+              <PseudoErrorCard
+                text={pseudoError}
+                column={result.columns[0]?.name ?? ""}
+              />
+            )}
+
+            {result && !pseudoError && <ResultTable data={result} />}
 
             {error && (
               <ErrorCard
@@ -320,19 +361,9 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        <span>rebuild/ · S6</span>
-        <span>
-          下一步 S7：前端从契约生成，不再从记忆硬编码
-        </span>
+        <span>rebuild/ · S7</span>
+        <span>下一步 S8：性能基线与 P50/P95 预算</span>
       </footer>
     </div>
-  );
-}
-
-function isAbort(reason: unknown): boolean {
-  return (
-    typeof reason === "object" &&
-    reason !== null &&
-    (reason as { name?: string }).name === "AbortError"
   );
 }

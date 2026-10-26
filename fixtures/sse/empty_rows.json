@@ -1,0 +1,10 @@
+{
+  "id": "empty_rows",
+  "title": "空数组（旧系统的 data:[]）",
+  "source": "handwritten",
+  "note": "旧系统发 data:[] 时前端整张表消失，只剩一句话。新后端改发 EMPTY_RESULT（类别 empty），但前端仍要能处理0 行的结果表：显式空态块，不是空白。",
+  "delay_before_last_ms": 0,
+  "frames": [
+    "data: {\"type\": \"result\", \"data\": {\"columns\": [], \"rows\": []}}\n\n"
+  ]
+}

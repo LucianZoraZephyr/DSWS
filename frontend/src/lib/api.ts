@@ -1,13 +1,7 @@
-import type {
-  AgentEvent,
-  CellValue,
-  ColumnType,
-  ErrorClass,
-  ErrorDetail,
-  ErrorTableResponse,
-  ProgressStatus,
-  ResultColumn,
-} from "../types";
+import sseSchema from "../generated/sse.schema.json";
+import { EVENT_TYPES } from "../generated/sse";
+import type { AgentEvent, ErrorTableResponse } from "../types";
+import { formatErrors, validate } from "./json-schema";
 
 /**
  * 开发期走 Vite 代理（/api → 后端），生产期同源部署。
@@ -24,181 +18,52 @@ export class ApiError extends Error {
   }
 }
 
-const PROGRESS_STATUS: ReadonlySet<string> = new Set([
-  "running",
-  "success",
-  "error",
-  "skipped",
-]);
-
-const ERROR_CLASSES: ReadonlySet<string> = new Set([
-  "failure",
-  "empty",
-  "cancelled",
-]);
-
-const COLUMN_TYPES: ReadonlySet<string> = new Set([
-  "string",
-  "number",
-  "boolean",
-  "null",
-  "date",
-]);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function fail(message: string): never {
-  throw new ApiError("PROTOCOL_ERROR", message);
-}
-
-const DETAIL_KEYS = [
-  "reason_code",
-  "reason",
-  "sql",
-  "original_sql",
-  "corrected_sql",
-  "attempts",
-  "rows",
-  "request_id",
-] as const;
-
 /**
- * 错误细节。字段名由契约定死，多余的键直接报错——不能让后端悄悄塞
- * 一个前端看不懂的字段进来。
- */
-function parseDetail(value: unknown): ErrorDetail | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (!isRecord(value)) fail("error.detail 必须是对象");
-  const detail: Record<string, unknown> = {};
-  for (const key of Object.keys(value)) {
-    if (!DETAIL_KEYS.includes(key as (typeof DETAIL_KEYS)[number])) {
-      fail(`error.detail 出现未定义的键：${key}`);
-    }
-    detail[key] = value[key];
-  }
-  return detail as ErrorDetail;
-}
-
-/**
- * 运行时类型守卫。
+ * 事件解析的结果。
  *
- * `as AgentEvent` 只是编译期断言；线上收到什么都有可能。
- * 这里逐字段校验，未知 type / status / step 一律抛错，绝不静默吞掉。
+ * 三种结局，而不是两种——这是审计 F3 的落点：
+ *
+ *   ok            合法事件
+ *   unknown_type  **后端加了新事件类型**。这不是「这条消息坏了」，
+ *                 是「契约长了一条腿」。旧系统把它当成 error，于是
+ *                 后端一升级，用户就看到一次莫名的失败。
+ *   invalid       已知类型但字段不合法 —— 契约真的被破坏了，必须报错。
  */
-export function parseAgentEvent(value: unknown): AgentEvent {
-  if (!isRecord(value)) fail("事件必须是 JSON 对象");
+export type EventParseResult =
+  | { ok: true; event: AgentEvent }
+  | { ok: false; kind: "unknown_type"; type: string }
+  | { ok: false; kind: "invalid"; message: string };
+
+/**
+ * 运行时校验：验的是**契约本身**。
+ *
+ * `generated/sse.schema.json` 是 `contracts/sse.schema.json` 的生成副本，
+ * 校验器（`./json-schema.ts`）是通用引擎——这里没有任何一条规则是手抄的。
+ */
+export function parseAgentEvent(value: unknown): EventParseResult {
+  if (!isRecord(value)) {
+    return { ok: false, kind: "invalid", message: "事件必须是 JSON 对象" };
+  }
 
   const type = value.type;
-  if (typeof type !== "string") fail("事件缺少 type");
-
-  switch (type) {
-    case "progress": {
-      const step = value.step;
-      if (typeof step !== "string" || step.length === 0) {
-        fail("progress.step 必须是非空字符串");
-      }
-
-      const status = value.status;
-      if (typeof status !== "string" || !PROGRESS_STATUS.has(status)) {
-        fail(`未知的 progress.status：${String(status)}`);
-      }
-
-      const duration = value.duration_ms;
-      if (status === "success" || status === "error") {
-        if (
-          typeof duration !== "number" ||
-          !Number.isFinite(duration) ||
-          duration < 0
-        ) {
-          fail(`${status} 必须带非负的 duration_ms`);
-        }
-      } else if (duration !== null) {
-        fail(`${status} 的 duration_ms 必须是 null`);
-      }
-
-      return {
-        type: "progress",
-        step,
-        status: status as ProgressStatus,
-        duration_ms: duration as number | null,
-      };
-    }
-
-    case "result": {
-      const data = value.data;
-      if (!isRecord(data)) fail("result.data 必须是对象");
-
-      const { columns, rows } = data;
-      if (!Array.isArray(columns) || !Array.isArray(rows)) {
-        fail("result.data 必须包含 columns 和 rows 数组");
-      }
-
-      const parsedColumns: ResultColumn[] = columns.map((column, index) => {
-        if (!isRecord(column)) fail(`columns[${index}] 必须是对象`);
-        const name = column.name;
-        const columnType = column.type;
-        if (
-          typeof name !== "string" ||
-          typeof columnType !== "string" ||
-          !COLUMN_TYPES.has(columnType)
-        ) {
-          fail(`columns[${index}] 的 name/type 不合法`);
-        }
-        return { name, type: columnType as ColumnType };
-      });
-
-      const parsedRows: CellValue[][] = rows.map((row, rowIndex) => {
-        if (!Array.isArray(row)) fail(`rows[${rowIndex}] 必须是数组`);
-        return row.map((cell) => {
-          if (
-            cell === null ||
-            typeof cell === "string" ||
-            typeof cell === "number" ||
-            typeof cell === "boolean"
-          ) {
-            return cell;
-          }
-          return fail(`rows[${rowIndex}] 含非法单元格类型`);
-        });
-      });
-
-      return { type: "result", data: { columns: parsedColumns, rows: parsedRows } };
-    }
-
-    case "error": {
-      const code = value.code;
-      const message = value.message;
-      if (typeof code !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(code)) {
-        fail("error.code 必须是 UPPER_SNAKE_CASE");
-      }
-      if (typeof message !== "string") fail("error.message 必须是字符串");
-      if (!("step" in value) || (value.step !== null && typeof value.step !== "string")) {
-        fail("error.step 必须是字符串或 null");
-      }
-      // class 是必填：前端靠它区分「红框」「空态」「取消」。
-      // 没有它，失败就只剩一种长相——那正是旧系统的毛病。
-      if (!("class" in value) || typeof value.class !== "string") {
-        fail("error.class 必须是字符串");
-      }
-      if (!ERROR_CLASSES.has(value.class)) {
-        fail(`未知的 error.class：${String(value.class)}`);
-      }
-      const detail = parseDetail(value.detail);
-      return {
-        type: "error",
-        code,
-        class: value.class as ErrorClass,
-        message,
-        step: value.step as string | null,
-        ...(detail ? { detail } : {}),
-      };
-    }
-
-    default:
-      throw new ApiError("UNKNOWN_EVENT", `未知事件类型：${type}`);
+  if (typeof type !== "string") {
+    return { ok: false, kind: "invalid", message: "事件缺少 type" };
   }
+
+  if (!(EVENT_TYPES as readonly string[]).includes(type)) {
+    return { ok: false, kind: "unknown_type", type };
+  }
+
+  const errors = validate(sseSchema, value);
+  if (errors.length > 0) {
+    return { ok: false, kind: "invalid", message: formatErrors(errors) };
+  }
+
+  return { ok: true, event: value as unknown as AgentEvent };
 }
 
 /**
@@ -213,9 +78,14 @@ export function parseAgentEvent(value: unknown): AgentEvent {
 export class SseParser {
   private buffer = "";
   private readonly onEvent: (event: AgentEvent) => void;
+  private readonly onUnknownType: ((type: string) => void) | undefined;
 
-  constructor(onEvent: (event: AgentEvent) => void) {
+  constructor(
+    onEvent: (event: AgentEvent) => void,
+    onUnknownType?: (type: string) => void,
+  ) {
     this.onEvent = onEvent;
+    this.onUnknownType = onUnknownType;
   }
 
   feed(chunk: string): void {
@@ -247,17 +117,70 @@ export class SseParser {
       throw new ApiError("PROTOCOL_ERROR", "事件不是合法 JSON");
     }
 
-    this.onEvent(parseAgentEvent(parsed));
+    const result = parseAgentEvent(parsed);
+    if (result.ok) {
+      this.onEvent(result.event);
+      return;
+    }
+    if (result.kind === "unknown_type") {
+      // 后端加了新事件类型：**忽略**，但要留下痕迹。
+      // 旧系统在这里把它当成 error（App.tsx 的兜底分支），于是后端
+      // 一升级，用户就看到一次莫名的失败。
+      this.onUnknownType?.(result.type);
+      return;
+    }
+    throw new ApiError("PROTOCOL_ERROR", result.message);
   }
+}
+
+/**
+ * HTTP 状态 → 人话。
+ *
+ * 旧系统一律显示「无法连接问数接口。」——422（问题写错了）和 500（服务
+ * 挂了）是完全不同的两件事，用户却拿到同一句话（审计 F11）。
+ */
+function httpError(status: number, detail: string): ApiError {
+  if (status === 400 || status === 422) {
+    return new ApiError("VALIDATION_ERROR", `问题格式不对：${detail}`);
+  }
+  if (status === 404) {
+    return new ApiError("NOT_FOUND", `接口不存在（HTTP ${status}）。`);
+  }
+  if (status >= 500) {
+    return new ApiError("SERVER_ERROR", `问数服务异常（HTTP ${status}）：${detail}`);
+  }
+  return new ApiError("HTTP_ERROR", `接口请求失败（HTTP ${status}）：${detail}`);
+}
+
+async function readErrorDetail(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body) && body.detail !== undefined) {
+      return typeof body.detail === "string"
+        ? body.detail
+        : JSON.stringify(body.detail);
+    }
+  } catch {
+    // 错误体不是 JSON，保留 HTTP 状态
+  }
+  return `HTTP ${response.status}`;
 }
 
 export async function fetchSteps(): Promise<{
   version: number;
   steps: { id: string; label: string; conditional?: boolean }[];
 }> {
-  const response = await fetch("/api/steps");
+  let response: Response;
+  try {
+    response = await fetch("/api/steps");
+  } catch (reason) {
+    throw new ApiError(
+      "NETWORK_ERROR",
+      `连不上问数服务：${reason instanceof Error ? reason.message : String(reason)}`,
+    );
+  }
   if (!response.ok) {
-    throw new ApiError("HTTP_ERROR", `加载步骤目录失败：HTTP ${response.status}`);
+    throw httpError(response.status, await readErrorDetail(response));
   }
   return (await response.json()) as {
     version: number;
@@ -274,10 +197,7 @@ export async function fetchSteps(): Promise<{
 export async function fetchErrorCodes(): Promise<ErrorTableResponse> {
   const response = await fetch("/api/errors");
   if (!response.ok) {
-    throw new ApiError(
-      "HTTP_ERROR",
-      `加载错误码表失败：HTTP ${response.status}`,
-    );
+    throw httpError(response.status, await readErrorDetail(response));
   }
   return (await response.json()) as ErrorTableResponse;
 }
@@ -295,7 +215,7 @@ export async function cancelQuery(requestId: string): Promise<boolean> {
     body: JSON.stringify({ request_id: requestId }),
   });
   if (!response.ok) {
-    throw new ApiError("HTTP_ERROR", `取消失败：HTTP ${response.status}`);
+    throw httpError(response.status, await readErrorDetail(response));
   }
   const payload = (await response.json()) as { cancelled: boolean };
   return Boolean(payload.cancelled);
@@ -305,6 +225,8 @@ export interface StreamOptions {
   signal?: AbortSignal;
   /** 后端在响应头里给出 request_id，前端靠它取消这次问数。 */
   onRequestId?: (requestId: string) => void;
+  /** 收到未知事件类型时调用（契约长了一条腿，不算失败）。 */
+  onUnknownType?: (type: string) => void;
 }
 
 export async function streamQuery(
@@ -312,30 +234,24 @@ export async function streamQuery(
   onEvent: (event: AgentEvent) => void,
   options: StreamOptions = {},
 ): Promise<void> {
-  const response = await fetch("/api/query", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
-    signal: options.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+      signal: options.signal,
+    });
+  } catch (reason) {
+    if (isAbortError(reason)) throw reason;
+    throw new ApiError(
+      "NETWORK_ERROR",
+      `连不上问数服务：${reason instanceof Error ? reason.message : String(reason)}。请确认后端已启动。`,
+    );
+  }
 
   if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const body: unknown = await response.json();
-      if (isRecord(body) && body.detail !== undefined) {
-        detail =
-          typeof body.detail === "string"
-            ? body.detail
-            : JSON.stringify(body.detail);
-      }
-    } catch {
-      // 错误体不是 JSON，保留 HTTP 状态
-    }
-    throw new ApiError(
-      response.status === 422 ? "VALIDATION_ERROR" : "HTTP_ERROR",
-      detail,
-    );
+    throw httpError(response.status, await readErrorDetail(response));
   }
 
   const requestId = response.headers.get("X-Request-Id");
@@ -347,7 +263,7 @@ export async function streamQuery(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const parser = new SseParser(onEvent);
+  const parser = new SseParser(onEvent, options.onUnknownType);
 
   while (true) {
     const { done, value } = await reader.read();
@@ -357,4 +273,12 @@ export async function streamQuery(
 
   parser.feed(decoder.decode()); // flush TextDecoder
   parser.flush(); // 处理缺少结尾空行的最后一帧
+}
+
+export function isAbortError(reason: unknown): boolean {
+  return (
+    typeof reason === "object" &&
+    reason !== null &&
+    (reason as { name?: string }).name === "AbortError"
+  );
 }
