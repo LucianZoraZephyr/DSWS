@@ -1,8 +1,8 @@
-# 从零搭建 rebuild（S0–S3 已验证版）
+# 从零搭建 rebuild（S0–S4 已验证版）
 
-> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索**。
-> **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；本手册是 tag 之后的文档提交，位于 `main`。
-> **不包含**：S4 生成 SQL、S5 安全、S6 失败通道、S7 前端收口、S8 性能。
+> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL**。
+> **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；S4 与本手册位于 `main`。
+> **不包含**：S5 安全、S6 失败通道、S7 前端收口、S8 性能。
 >
 > 这份手册刻意把三件事分开写：
 >
@@ -35,9 +35,15 @@ cd ../../rebuild
 # 5) 构建元知识，再跑检索
 make stage2
 make stage3
+
+# 6) S4：生成 SQL（不需要三存储）
+make stage4
 ```
 
-如果上面的命令全部打印 `PASS`，说明 S0–S3 的代码级验收通过。
+如果上面的命令全部打印 `PASS`，说明 S0–S4 的代码级验收通过。
+
+> S4 单独拿出来也能跑：它只到「生成 + 静态校验」，上下文由契约离线裁剪，
+> **不需要 MySQL / ES / Qdrant，也不需要 API key 或网络**。
 
 > ⚠️ 但“S3 通过”不等于“前端已经能真实问数”。当前 `/api/query` 仍是 S0 的假 SSE，S3 只通过 CLI 调用。详见第 7 节。
 
@@ -58,6 +64,7 @@ make stage3
 | Docker Engine | 29.1.3 | 三存储用 |
 | Docker Compose | 2.40.3 | 使用 `docker compose`（v2） |
 | Chrome | 已安装 | 只有可选的 `make stage0-ui` 需要 |
+| GNU Make | 4.4.1（Windows 便携版）/ 4.x（Linux） | 所有 `make stageN` 验收命令都靠它 |
 
 > ℹ️ 这些是“本机验证版本”，不是严格的最低版本。Python 最低按 `pyproject.toml` 是 3.12；Node 建议不要用过老的版本。
 
@@ -435,7 +442,43 @@ examples_policy: ...
 > 同一 `RecallState` 的 YAML 渲染本身是稳定的。需要固定日期时，代码里可以给
 > `recall(..., now=...)` 注入时间；CLI 目前不暴露这个参数。
 
-### 2.7 启动开发服务（可选）
+### 2.7 S4：生成 SQL（不需要三存储）
+
+```bash
+cd "<你的目录>/A020-电商问数智能体实战教程fixed/code/rebuild"
+make stage4
+```
+
+`make stage4` 做三件事：
+
+1. **10 题基线**：`python -m app.scripts.generate --baseline`，打印
+   「问题 / SQL / 判定」表格。8 题取自 S3 黄金集，2 题是越界题。
+2. **生成层测试**：提示词契约（槽位双向校验、缺槽报错）、sqlglot 静态校验
+   （每个违规码都有能复现它的负例）、生成与拒答路径、契约/提示词/代码三方对齐。
+3. **全量后端测试**。
+
+单独看基线表格：
+
+```bash
+make baseline
+```
+
+单题：
+
+```bash
+cd backend
+uv run python -m app.scripts.generate "华北销售额"   # stdout YAML / stderr 统计
+```
+
+S4 的输出只有两种形状：`{"sql": "..."}` 或
+`{"refusal": {"code": "...", "reason": "..."}}`。静态校验不通过的 SQL 不会以
+`sql` 的形态返回，一律降级成带违规码的拒答。
+
+> **要接真实 LLM 时**：设置 `REBUILD_LLM_BASE_URL` / `REBUILD_LLM_API_KEY` /
+> `REBUILD_LLM_MODEL` 后用 `HttpLlmGenerator`。它产出的 SQL 一样要过静态校验——
+> 换成真模型不会放宽任何一条硬规则。默认路径是确定性生成器，不需要任何配置。
+
+### 2.8 启动开发服务（可选）
 
 只有想看 S0 的假 SSE / 步骤条时才需要。
 
@@ -482,13 +525,16 @@ curl -sS http://127.0.0.1:5273/api/health
 | S1 | `make stage1` | 否 | 5 表/24 列/6 指标契约；旧系统 8 个错误码必须红；40 测试 |
 | S2 | `make stage2` | 是 | 三存储构建、manifest、计数对账、`NOOP: 0 writes`；16 测试 |
 | S3 | `make stage3` | 是 | 4 路批量召回 + merge/filter/context；20 题黄金集；38 测试 |
+| S4 | `make stage4` | 否 | 7 个提示词槽位校验 + sqlglot AST 静态校验 + 10 题基线；113 测试 |
 
 当前测试总数：
 
-- 后端：`19 + 40 + 16 + 38 = 113`
+- 后端：`19 + 40 + 16 + 38 + 113 = 226`
 - 前端：`18`
-- 全量后端默认：`90 passed, 23 skipped`（23 条是 S3 真实存储集成测试）
+- 全量后端默认：`198 passed, 28 skipped`（23 条是 S3 真实存储集成测试，
+  5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过）
 - `make stage3` 的 S3 集成：`38 passed`
+- `make stage4` 的生成层：`108 passed, 5 skipped`
 
 ---
 
@@ -583,6 +629,14 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ## 6. 常见故障
 
+### Windows 相关
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| `UnicodeEncodeError: 'gbk' codec can't encode character` | Windows 控制台默认代码页是 GBK（cp936），项目里的中文与 `↔` 之类符号 print 不了 | CLI 内部已把 stdout/stderr 切到 UTF-8（`backend/app/cli.py`）；**make 自己 echo 的那几行中文**仍按控制台代码页渲染，先 `chcp 65001` 再跑 make |
+| `make: command not found` | 没装 make | `winget install ezwinports.make`（便携版，不需要管理员），装完**重开一个终端**让 PATH 生效 |
+| `docs\SCHEMA-CONTRACT.md 已过期` | 生成文档时用了 `os.sep`，Windows 下路径分隔符是 `\`，与仓库里 Linux 生成的版本对不上 | 已修（`schema_contract._path_label` 改用 `as_posix()`）。若仍出现，跑 `python -m app.schema_contract --write-doc` 重新生成 |
+
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `permission denied ... /var/run/docker.sock` | 当前用户没有 Docker socket 权限 | 用有权限的账号，或加入 `docker` 组后重新登录 |
@@ -603,7 +657,19 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ## 7. 已验证 / 未验证清单
 
-### ✅ 本机已验证（2026-10-25）
+### ✅ 本机已验证（2026-10-26，Windows 11 + Git Bash）
+
+- `make stage0`：19 后端 + 18 前端 + 构建，PASS。
+- `make stage1`：契约/DDL/数据 + 旧系统 8 个错误码 + 59 条 S0/S1 测试，PASS。
+- `make stage4`：10 题基线 10/10（其中 2 道显式拒答）；生成层 108 passed /
+  5 skipped；全量后端 198 passed / 28 skipped；PASS。
+- S4 的静态校验：每个违规码都有能复现它的负例（多语句 / UPDATE / DELETE /
+  DROP / INTO OUTFILE / 未知表 / 未知列 / 常量投影 / NULL 投影 / 缺 ORDER BY /
+  缺 LIMIT / 语法错误 / 空 SQL）。
+- 依赖补全：`make`（winget `ezwinports.make` 4.4.1）、`frontend/node_modules`
+  （`npm ci`）、后端新增 `sqlglot`（AST 校验）与 `jsonschema`（输出形状校验）。
+
+### ✅ 本机已验证（2026-10-25，Linux）
 
 - `make stage0`：19 后端 + 18 前端 + 构建，PASS。
 - `make stage1`：契约/DDL/数据 + 旧系统 8 个错误码 + 59 条 S0/S1 测试，PASS。
@@ -625,7 +691,11 @@ uv run python -m app.build_meta_knowledge --dry-run
 - 带鉴权的 ES/Qdrant：当前代码只发 URL，没有 API key/TLS 参数，不能只改 URL。
 - 真实 bge embedding：当前只支持 `hash-ngram-v1`，S3 召回质量有限。
 - S3 接入 `/api/query`：尚未接入，前端仍是 S0 假流。
-- S4–S8：不存在。
+- S4 接入 `/api/query`：同样**没有**接线。S4 只到 CLI 与 `make stage4`，
+  前端要能真实问数要等 S6（失败通道）+ S7（前端收口）。
+- S4 的真实 LLM 通路（`HttpLlmGenerator`）：接口与校验都在，但没有对着
+  真实端点跑过；默认走的是确定性生成器。
+- S5–S8：不存在。
 
 ### ℹ️ 明确的边界
 
@@ -639,11 +709,16 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ## 8. 下一步
 
-当前停点就是 S3。下一步是 **S4：生成 SQL**：
+当前停点就是 S4。下一步是 **S5：安全边界**：
 
-- `generate_sql` + 7 个提示词槽位；
-- 输出 JSON schema：`{sql}` 或 `{refusal: {code, reason}}`；
-- 10 题基线；
-- 静态校验：单语句、只读、列存在、无常量/NULL 投影、排名有 ORDER BY。
+- `validate_sql` 升级为 AST 级安全策略（白名单、超时、注入语料）；
+- 只读 DB 账号 + 语句超时；
+- 注入语料（多语句 / `SELECT 1; DROP` / UPDATE / UNION 外带 / 注释绕过 /
+  `INTO OUTFILE`）100% 拒绝，错误码 `SQL_REJECTED`。
 
-在 S4 落地之前，不要承诺“前端能真实问数”，也不要执行不存在的 `make stage4`。
+S4 已经把「只读 / 单语句 / 列存在 / 无常量投影 / 排名有 ORDER BY」这五条
+规则做成了代码级守卫（`backend/app/generate/guard.py`），S5 要做的是**再往
+上叠一层安全策略**：白名单、只读账号、超时，以及一整套注入语料。
+
+在 S5/S6/S7 落地之前，仍然不要承诺“前端能真实问数”——`/api/query` 至今
+还是 S0 的假 SSE。

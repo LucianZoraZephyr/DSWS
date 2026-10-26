@@ -17,7 +17,7 @@
 | **S1 Schema 契约** | ✅ 完成 | `make stage1` |
 | **S2 元知识构建** | ✅ 完成 | `make stage2` |
 | **S3 检索** | ✅ 完成 | `make stage3` |
-| S4 生成 SQL | ⬜ 待做 | `make stage4` |
+| **S4 生成 SQL** | ✅ 完成 | `make stage4` |
 | S5 安全边界 | ⬜ 待做 | `make stage5` |
 | S6 失败通道 | ⬜ 待做 | `make stage6` |
 | S7 前端收口 | ⬜ 待做 | `make stage7` |
@@ -351,6 +351,149 @@ uv run python -m app.scripts.recall "华北销售额"        # stdout YAML / std
 
 ---
 
+## S4 做了什么
+
+**一句话**：把「召回上下文」翻译成**一条可被机器判定的 SQL**，或者一个**有名字的拒答**——
+并把「只读 / 单语句 / 列存在 / 无常量投影 / 排名必带 ORDER BY」这五条规则
+从提示词搬进**代码**。
+
+```
+query
+  -> build_offline_context     （契约离线裁剪；或 context_from_recall_state 接 S3）
+  -> build_slots               （7 个槽位）
+  -> render_prompt             （缺槽位直接抛异常）
+  -> generator.generate        （确定性实现 / 可选 LLM）
+  -> 输出形状校验               （sql_or_refusal）
+  -> 静态校验                   （sqlglot AST，5 条硬规则）
+  -> GenerationResult
+```
+
+**S4 不执行 SQL**，边界到「生成 + 静态校验」为止；`run_sql` 留给 S5/S6。
+
+### 三条硬规则写在两个地方
+
+审计发现旧系统 7 个提示词里，`ORDER BY` / `排序` / `LIMIT` / `Top` **总命中 0**，
+`拒绝` / `无法生成` 也**总命中 0**——也就是说「排名必带 ORDER BY」和
+「越界必拒答」这两条规则**从来就没存在过**。
+
+S4 让它们同时存在于两处，并且**代码层是最终裁判**：
+
+| 硬规则 | 提示词里 | 代码里 |
+|---|---|---|
+| 排名必带 ORDER BY | `generate_sql.prompt` 的硬规则一 | `guard.py` → `SQL_MISSING_ORDER_BY` / `SQL_MISSING_LIMIT` |
+| 越界必拒答 | 硬规则二 | `intent.py` → `OUT_OF_RANGE` / `UNSUPPORTED_INTENT` |
+| 禁止常量 / NULL 投影 | 硬规则三 | `guard.py` → `SQL_CONSTANT_PROJECTION` |
+
+生成器和校验器**共用** `app/generate/intent.py` 里同一份排名判断，所以不会出现
+「生成器觉得该排、校验器觉得不用排」这种规则跑偏。
+
+### 槽位校验是真的会报错
+
+旧系统 7 个提示词的占位符「看起来」四方一致，但 langchain-core 会用模板自动
+探测的结果**覆盖**节点里写的 `input_variables`——那 7 处声明是**死代码**，
+拼错也不报错。
+
+S4 反过来做：**frontmatter 的 `slots` 声明是唯一事实源**。
+
+- 正文里出现但没声明的占位符 → 加载即报错；
+- 声明了但正文里没出现的槽位 → 加载即报错；
+- 渲染时少给一个槽 → `PromptSlotError`，**不静默补空串**。
+
+`generate_sql` 正好 **7 个槽位**：`query / table_infos / column_infos /
+metric_infos / value_infos / date_info / db_info`（旧系统只有 5 个，没有
+`column_infos` 与 `value_infos`）。
+
+### 输出只有两种形状
+
+`contracts/sql.output.schema.json` 的 `sql_or_refusal` 只允许两种形状，
+**没有第三种**：
+
+```json
+{"sql": "SELECT ..."}
+{"refusal": {"code": "OUT_OF_RANGE", "reason": "..."}}
+```
+
+所以旧系统那句 `SELECT '无法生成SQL…' AS error_message`——把失败伪装成一行
+数据——在契约层就不可能发生。静态校验不通过的 SQL **不会**以 `sql` 的形态
+返回，一律降级成带违规码的拒答。
+
+### 静态校验用 AST，不用正则
+
+`guard.py` 用 sqlglot 把 SQL 解析成 AST 再判定，五条规则各自都有能复现它的
+负例：
+
+| 违规码 | 判定 |
+|---|---|
+| `SQL_MULTIPLE_STATEMENTS` | 解析出不止一条语句 |
+| `SQL_NOT_READ_ONLY` | 根节点不是 SELECT；或出现 DML/DDL/INTO |
+| `SQL_UNKNOWN_TABLE` | 引用了上下文之外的表 |
+| `SQL_UNKNOWN_COLUMN` | 引用了上下文之外的字段 |
+| `SQL_CONSTANT_PROJECTION` | SELECT 列表里投影了字面量常量或裸 NULL |
+| `SQL_MISSING_ORDER_BY` / `SQL_MISSING_LIMIT` | 有排名意图却缺 ORDER BY / LIMIT |
+
+「只读」额外有一道**词法防线**：AST 解析不了 `SELECT ... INTO OUTFILE`，
+只有词法扫描能把它认成「不是只读」而不是「语法错误」——错误码是契约的一部分。
+
+### 为什么 S4 有「确定性生成器」这一层
+
+路线图要求 S4 的验收是「10 题基线 + `make baseline` 表格」。**表格要稳定可
+复现**，就不能每次都问一次模型。所以 S4 同时交付两样东西：
+
+- **提示词契约**：7 个 `.prompt` 文件，每个声明槽位与输出 schema
+  （`generate_sql` 是唯一的运行时提示词，其余 6 个标注为旧系统对照资产）；
+- **确定性实现**：纯代码、不调模型、产出**同一个形状**、过**同一套校验**。
+
+真的想接 LLM 时，`HttpLlmGenerator` 已经留好接口（OpenAI 兼容端点，设置
+`REBUILD_LLM_BASE_URL` / `REBUILD_LLM_API_KEY` / `REBUILD_LLM_MODEL` 才启用），
+它产出的 SQL 一样要过静态校验——**换成真模型不会放宽任何一条硬规则**。
+
+### 10 题基线
+
+`backend/tests/generate/baseline.yaml`：8 题取自 S3 黄金集（同题在检索层和
+生成层必须一致，有测试钉住），另加 2 道越界题。
+
+```
+| 问题               | 判定     |
+| 华北销售额          | PASS     |
+| 平均客单价          | PASS     |
+| 各品类销量          | PASS     |
+| 品牌销售额 Top 3    | PASS     |
+| 黄金会员订单量       | PASS     |
+| 哪个省销量最高       | PASS     |
+| 各省平均订单金额      | PASS     |
+| 2025 年 1 月销量     | PASS     |
+| 2024 年销售额       | REFUSAL (OUT_OF_RANGE)        |
+| 各城市销售额        | REFUSAL (UNSUPPORTED_INTENT)  |
+```
+
+当前 **10/10 通过**。
+
+### S4 不需要 MySQL / ES / Qdrant
+
+上下文由契约离线裁剪（`build_offline_context`），所以 `make stage4` 在一台
+**没有 Docker、没有 API key、没有网络**的机器上就能跑完并给出同样结果。
+真接 S3 召回时用 `--live`（或 `generate_with_recall`），服务不可用会**直接
+报错**，不会悄悄退回离线上下文。
+
+### 命令
+
+```bash
+make stage4
+
+# 或者逐步看
+cd backend
+uv run pytest -q tests/generate                              # 113 条（108 + 5 跳过）
+uv run python -m app.scripts.generate "华北销售额"           # stdout YAML / stderr 统计
+uv run python -m app.scripts.generate --baseline             # 10 题表格
+```
+
+### 本次测试
+
+- S4：108 条 + 5 条按需跳过（提示词契约 / 静态校验 / 生成 / 基线 / 三方对齐 / S3→S4 适配）
+- 合计：**226 条**（198 通过 / 28 跳过）；`make stage4` 会跑全量后端测试。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -374,11 +517,21 @@ make stage0-ui        # 可选：真实 Chrome 冒烟（自起临时端口 8101/
 make stage1           # S1：契约绿 + 负向夹具红 + 后端 S0/S1 测试（不需要 MySQL/Docker）
 make stage2           # S2：dry-run + --fresh + --verify + 幂等（需要 MySQL/ES/Qdrant）
 make stage3           # S3：S2 对账 + 20 题黄金集 + CLI YAML + 全部后端测试
+make stage4           # S4：10 题基线 + 生成层测试 + 全部后端测试（不需要 MySQL/Docker）
+make baseline         # 只看 S4 的基线表格：问题 / SQL / 判定
 ```
 
 > `make stage2` 的前置是旧系统 docker compose 里的 MySQL / ES / Qdrant 已启动；
 > 它只操作 `*_rebuild` 目标，不会删旧系统的数据卷。当前 embedding 容器坏了也没关系，
 > S2 默认用确定性哈希向量。
+>
+> `make stage4` **不需要**任何外部服务：上下文由契约离线裁剪，基线因此可以在
+> 任何一台机器上复现同样的结果。
+
+> **Windows**：控制台默认代码页是 GBK，中文与 `↔` 之类符号会触发
+> `UnicodeEncodeError`，导致 `make stage1` 直接崩。CLI 内部已经把 stdout/stderr
+> 切到 UTF-8（`backend/app/cli.py`），但 **make 自己 echo 的那几行中文**仍按
+> 控制台代码页渲染——先执行 `chcp 65001` 再跑 make，输出就是正常的。
 
 ---
 
@@ -389,7 +542,9 @@ rebuild/
 ├── contracts/              # 契约（前后端唯一事实源）
 │   ├── steps.yaml          # 12 个步骤 + conditional 标记
 │   ├── sse.schema.json     # 三种 SSE 事件
-│   └── schema.contract.yaml # S1：5 表 / 24 列 / 6 指标的语义契约
+│   ├── schema.contract.yaml # S1：5 表 / 24 列 / 6 指标的语义契约
+│   ├── sql.output.schema.json # S4：sql_or_refusal + 拒答码表
+│   └── prompts/            # S4：7 个提示词（frontmatter 声明槽位 + 输出 schema）
 ├── fixtures/               # S1 冻结数据与负向夹具（不依赖旧项目）
 │   ├── dw.sql              # 物理 DDL + 115 单真实数据
 │   └── legacy/             # 旧 meta_config.yaml + 功能清单（必须红）
@@ -398,13 +553,17 @@ rebuild/
 │   └── screenshots/
 ├── backend/
 │   ├── app/main.py         # S0 假流 + /api/steps
+│   ├── app/cli.py          # CLI 公共入口（stdout 固定 UTF-8）
 │   ├── app/schema_contract.py # S1 检查器 + 文档生成器 + CLI
 │   ├── app/build_meta_knowledge.py # S2 CLI
 │   ├── app/build/          # S2 计划/embedding/三存储/manifest
 │   ├── app/recall/         # S3 关键词/批量召回/合并过滤/YAML
+│   ├── app/generate/       # S4 上下文/提示词/生成器/静态校验/编排
 │   ├── app/scripts/recall.py # S3 CLI（stdout YAML + stderr 统计）
-│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 = 113 条
-│       └── recall/         # 20 题黄金集 + 关键词/渲染/往返测试
+│   ├── app/scripts/generate.py # S4 CLI（YAML / --baseline 表格）
+│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 + S4 113 = 226 条
+│       ├── recall/         # 20 题黄金集 + 关键词/渲染/往返测试
+│       └── generate/       # 10 题基线 + 提示词/静态校验/三方对齐测试
 ├── frontend/
 │   ├── src/App.tsx
 │   ├── src/lib/api.ts                # 运行时类型守卫 + SSE 解析器
