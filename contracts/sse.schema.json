@@ -83,17 +83,37 @@
     },
     "error": {
       "type": "object",
-      "required": ["type", "code", "message", "step"],
+      "required": ["type", "code", "class", "message", "step"],
       "additionalProperties": false,
+      "description": "S6 失败通道。`error` 不等于「红框」：class 决定 UI 怎么渲染（failure 红框 / empty 空态 / cancelled 取消态）。`code` 必须来自 contracts/errors.yaml。",
       "properties": {
         "type": { "const": "error" },
         "code": {
           "type": "string",
           "pattern": "^[A-Z][A-Z0-9_]*$",
-          "description": "机器可判定的错误码，例如 SQL_REJECTED / LLM_REFUSAL / TIMEOUT"
+          "description": "机器可判定的错误码，取值见 contracts/errors.yaml"
+        },
+        "class": {
+          "enum": ["failure", "empty", "cancelled"],
+          "description": "失败类别：failure 真失败 / empty 合法但无数据 / cancelled 用户取消"
         },
         "message": { "type": "string" },
-        "step": { "type": ["string", "null"] }
+        "step": { "type": ["string", "null"] },
+        "detail": {
+          "type": "object",
+          "description": "可复制的细节：原因码、原始 SQL、校正后的 SQL、重试次数。",
+          "additionalProperties": false,
+          "properties": {
+            "reason_code": { "type": ["string", "null"] },
+            "reason": { "type": ["string", "null"] },
+            "sql": { "type": ["string", "null"] },
+            "original_sql": { "type": ["string", "null"] },
+            "corrected_sql": { "type": ["string", "null"] },
+            "attempts": { "type": ["integer", "null"], "minimum": 0 },
+            "rows": { "type": ["integer", "null"], "minimum": 0 },
+            "request_id": { "type": ["string", "null"] }
+          }
+        }
       }
     }
   }

@@ -35,13 +35,20 @@ DETERMINISTIC = "deterministic"
 HTTP_LLM = "http-llm"
 
 
-def build_slots(context: GenerateContext) -> dict[str, str]:
-    """把上下文渲染成 `generate_sql` 提示词的 7 个槽位。
+def dump_context(payload: Any) -> str:
+    """把上下文渲染成 YAML——给模型看的稳定可读结构。"""
+    return yaml.safe_dump(
+        payload,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=1000,
+    )
 
-    槽位顺序与 `contracts/prompts/generate_sql.prompt` 的 frontmatter 声明
-    完全一致；少一个槽，渲染时就会抛 `PromptSlotError`。
-    """
-    table_infos = [
+
+def table_infos(context: GenerateContext) -> list[dict[str, Any]]:
+    """表信息：名字、粒度、外键。"""
+    return [
         {
             "name": table.name,
             "grain": table.grain,
@@ -55,7 +62,10 @@ def build_slots(context: GenerateContext) -> dict[str, str]:
         for table in context.tables
     ]
 
-    column_infos = [
+
+def column_infos(context: GenerateContext) -> list[dict[str, Any]]:
+    """字段信息。"""
+    return [
         {
             "id": column.id,
             "table_id": column.table_id,
@@ -68,7 +78,10 @@ def build_slots(context: GenerateContext) -> dict[str, str]:
         for column in context.columns
     ]
 
-    metric_infos = [
+
+def metric_infos(context: GenerateContext) -> list[dict[str, Any]]:
+    """指标信息：口径公式本身就是可执行的 SQL 表达式。"""
+    return [
         {
             "name": metric.name,
             "label": metric.label,
@@ -84,28 +97,30 @@ def build_slots(context: GenerateContext) -> dict[str, str]:
         for metric in context.metrics
     ]
 
-    value_infos = [
+
+def value_infos(context: GenerateContext) -> list[dict[str, Any]]:
+    """取值信息。"""
+    return [
         {"value": value.value, "column_id": value.column_id}
         for value in context.values
     ]
 
-    def _dump(payload: Any) -> str:
-        return yaml.safe_dump(
-            payload,
-            allow_unicode=True,
-            sort_keys=False,
-            default_flow_style=False,
-            width=1000,
-        )
 
+def build_slots(context: GenerateContext) -> dict[str, str]:
+    """
+    把上下文渲染成 `generate_sql` 提示词的 7 个槽位。
+
+    槽位顺序与 `contracts/prompts/generate_sql.prompt` 的 frontmatter 声明
+    完全一致；少一个槽，渲染时就会抛 `PromptSlotError`。
+    """
     return {
         "query": context.query,
-        "table_infos": _dump(table_infos),
-        "column_infos": _dump(column_infos),
-        "metric_infos": _dump(metric_infos),
-        "value_infos": _dump(value_infos),
-        "date_info": _dump(dict(context.date_info)),
-        "db_info": _dump(dict(context.db_info)),
+        "table_infos": dump_context(table_infos(context)),
+        "column_infos": dump_context(column_infos(context)),
+        "metric_infos": dump_context(metric_infos(context)),
+        "value_infos": dump_context(value_infos(context)),
+        "date_info": dump_context(dict(context.date_info)),
+        "db_info": dump_context(dict(context.db_info)),
     }
 
 

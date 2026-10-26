@@ -432,6 +432,143 @@ tbody tr:hover td {
   font-size: 12px;
 }
 
+/* ---------------- 失败卡片的三种长相 ----------------
+ *
+ * class 决定长相，**不是**码决定：
+ *   failure    红框（真失败）
+ *   empty      虚线空态（合法但没有数据，不标红）
+ *   cancelled  中性卡（用户自己停的，不算失败）
+ */
+
+.error-card--empty {
+  border-style: dashed;
+  border-color: #d8cdb8;
+  border-left: 4px solid var(--brass);
+  background: #fdfaf2;
+  color: var(--ink);
+}
+
+.error-card--empty .error-head code {
+  background: rgba(168, 122, 32, 0.14);
+}
+
+.error-card--cancelled {
+  border-color: var(--line);
+  border-left: 4px solid #b0a795;
+  background: #f7f3ea;
+  color: var(--ink);
+}
+
+.error-card--cancelled .error-head code {
+  background: rgba(123, 115, 102, 0.14);
+}
+
+.error-message {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+}
+
+.error-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  margin: 10px 0 0;
+  color: inherit;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.error-chip {
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.error-reason {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.14);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.error-detail {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.error-detail summary {
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.error-detail pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.05);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error-actions {
+  margin-top: 12px;
+}
+
+.ghost-button {
+  padding: 5px 12px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.ghost-button:hover {
+  opacity: 1;
+}
+
+.stop-button {
+  padding: 12px 20px;
+  border: 1px solid #e7b9b0;
+  border-radius: 12px;
+  background: var(--tomato-soft);
+  color: var(--tomato);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.stop-button:hover {
+  background: #f3d9d2;
+}
+
+/* 取消态的步骤：既不是完成，也不是失败。 */
+.rail-cancelled .rail-marker {
+  border-style: dashed;
+  border-color: #b0a795;
+  color: #8a8172;
+  font-weight: 700;
+}
+
+.rail-cancelled .rail-label {
+  color: var(--muted);
+}
+
+.rail-cancelled .rail-status {
+  color: #8a8172;
+  font-style: italic;
+}
+
 /* ---------------- composer ---------------- */
 
 .composer {

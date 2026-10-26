@@ -1,0 +1,213 @@
+# S6 失败场景夹具
+#
+# 这份夹具是「6 类失败」在浏览器里的**可复现剧本**。
+#
+# 它伪造的只有两个外部依赖：**模型**与**数据库**。
+# 上下文构建、提示词渲染、静态校验（AST）、安全策略（AST）、校正闭环、
+# SSE 序列化——全都是真代码。所以屏幕上的每一个红叉都对应一次真实的判定。
+#
+# 场景应用的约定：问题写成「场景:<id> <真实问题>」。
+# 场景应用剥掉前缀，只把**真实问题**交给流水线（上下文因此是真实的）。
+# 没有任何前缀时走 default 场景（正常路径）。
+#
+# 场景 id 与路线图 S6 的验收一一对应：
+#
+#   sql_rejected        SQL_REJECTED        策略拒绝（UNION 外带）
+#   sql_syntax          SQL_SYNTAX          语法错误
+#   sql_unknown_column  SQL_UNKNOWN_COLUMN  引用了上下文之外的列
+#   empty_result        EMPTY_RESULT        查询成功但没有数据
+#   llm_refusal         LLM_REFUSAL         模型自己拒答
+#   timeout             TIMEOUT             执行超时
+#   cancelled           CANCELLED           用户取消（由取消按钮触发，无夹具）
+#
+# 外加两条：happy（正常路径）与 corrected（校正闭环成功）。
+
+version: 1
+default: happy
+prefix: "场景:"
+
+scenarios:
+  # -- 正常路径 -------------------------------------------------------------
+  - id: happy
+    title: 正常查询
+    desc: 一条合法 SQL 正常执行，返回 4 行。
+    expect:
+      outcome: result
+      rows: 4
+    generator:
+      sql: |
+        SELECT dim_region.region_name AS `地区`, SUM(fact_order.order_amount) AS `销售额`, COUNT(*) AS `订单数`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        GROUP BY dim_region.region_name
+    executor:
+      columns: [地区, 销售额, 订单数]
+      rows:
+        - [华北, 128400.0, 32]
+        - [华南, 96500.0, 24]
+        - [华东, 87200.0, 21]
+        - [西南, 41300.0, 11]
+
+  # -- 1/6 策略拒绝 ---------------------------------------------------------
+  - id: sql_rejected
+    title: SQL 被安全策略拒绝
+    desc: |
+      UNION 是外带数据的载体。S4 的静态校验放它过去（它确实是只读的），
+      S5 的安全策略拦下它 —— 原因码 SQL_FORBIDDEN_CONSTRUCT，通道码
+      SQL_REJECTED。
+    expect:
+      outcome: error
+      code: SQL_REJECTED
+      class: failure
+      step: validate_sql
+    generator:
+      sql: |
+        SELECT dim_region.region_name AS `地区`, SUM(fact_order.order_amount) AS `销售额`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        GROUP BY dim_region.region_name
+        UNION
+        SELECT dim_region.region_name, SUM(fact_order.order_amount)
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        GROUP BY dim_region.region_name
+    executor:
+      unused: true
+
+  # -- 2/6 语法错误 ---------------------------------------------------------
+  - id: sql_syntax
+    title: SQL 语法错误
+    desc: |
+      模型返回的 SQL 括号不配对。静态校验判定 SQL_SYNTAX —— 它是可重试的
+      错误，于是校正闭环被触发；校正器在离线夹具里拒答，于是错误仍然是
+      最初的语法错误（根因没变，错误就不该变）。
+    expect:
+      outcome: error
+      code: SQL_SYNTAX
+      class: failure
+      step: validate_sql
+    generator:
+      sql: "SELECT SUM(fact_order.order_amount FROM fact_order"
+    corrector:
+      refusal:
+        code: INVALID_OUTPUT
+        reason: 离线夹具无法修正这条 SQL。
+    executor:
+      unused: true
+
+  # -- 3/6 未知字段 ---------------------------------------------------------
+  - id: sql_unknown_column
+    title: 引用了不存在的列
+    desc: |
+      模型编了一个契约里没有的列。静态校验判定 SQL_UNKNOWN_COLUMN。
+    expect:
+      outcome: error
+      code: SQL_UNKNOWN_COLUMN
+      class: failure
+      step: validate_sql
+    generator:
+      sql: |
+        SELECT dim_region.no_such_column AS `地区`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+    executor:
+      unused: true
+
+  # -- 4/6 空结果 -----------------------------------------------------------
+  - id: empty_result
+    title: 查询成功但没有数据
+    desc: |
+      SQL 合法、执行成功、返回 0 行。**这不是失败**：界面给一张空态卡，
+      执行步骤保持绿色（审计 FP-8 的结论：空数组是合法语义）。
+    expect:
+      outcome: error
+      code: EMPTY_RESULT
+      class: empty
+      step: run_sql
+    generator:
+      sql: |
+        SELECT dim_region.region_name AS `地区`, SUM(fact_order.order_amount) AS `销售额`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        WHERE dim_region.region_name = '不存在的大区'
+        GROUP BY dim_region.region_name
+    executor:
+      columns: [地区, 销售额]
+      rows: []
+
+  # -- 5/6 模型拒答 ---------------------------------------------------------
+  - id: llm_refusal
+    title: 模型明确拒答
+    desc: |
+      问题超出数据边界，生成器直接拒答（OUT_OF_RANGE）。这不是系统的失败
+      类别，是模型的判断 —— 通道码 LLM_REFUSAL，原码留在 detail.reason_code。
+    expect:
+      outcome: error
+      code: LLM_REFUSAL
+      class: failure
+      step: generate_sql
+    generator:
+      refusal:
+        code: OUT_OF_RANGE
+        reason: 数据只覆盖 20250101 ~ 20250331，问题里的 2024 年超出数据边界。
+    executor:
+      unused: true
+
+  # -- 6/6 执行超时 ---------------------------------------------------------
+  - id: timeout
+    title: 执行超时
+    desc: |
+      SQL 合法，但数据库在 max_execution_time 之内没跑完。执行步骤红叉，
+      通道码 TIMEOUT。
+    expect:
+      outcome: error
+      code: TIMEOUT
+      class: failure
+      step: run_sql
+    generator:
+      sql: |
+        SELECT dim_region.region_name AS `地区`, SUM(fact_order.order_amount) AS `销售额`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        GROUP BY dim_region.region_name
+    executor:
+      error:
+        code: TIMEOUT
+        message: 执行超时：Query execution was interrupted, maximum statement execution time exceeded
+
+  # -- 附加：慢查询（用来演练取消） -----------------------------------------
+  - id: slow
+    title: 慢查询（用来点「停止」）
+    desc: |
+      执行器故意慢 2.5 秒，好让浏览器测试有时间点「停止」。
+      取消之后界面必须显示「已取消」，**不能**显示「完成」——
+      旧系统在这里写的是 `status: isAbort ? "done"`。
+    expect:
+      outcome: result
+      rows: 1
+    generator:
+      sql: |
+        SELECT dim_region.region_name AS `地区`, SUM(fact_order.order_amount) AS `销售额`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        GROUP BY dim_region.region_name
+    executor:
+      delay_s: 1.5
+      columns: [地区, 销售额]
+      rows:
+        - [华北, 128400.0]
+
+  # -- 附加：校正闭环成功 ---------------------------------------------------
+  - id: corrected
+    title: 校正闭环成功
+    desc: |
+      模型返回的 SQL 语法错误 → 校正器给出最小必要修正 → **重新校验**
+      （静态校验 + 安全策略）→ 通过 → 执行成功。
+      屏幕上「校验SQL」会先红后绿：第一次失败、重新校验通过。
+    expect:
+      outcome: result
+      rows: 1
+    generator:
+      sql: "SELECT SUM(fact_order.order_amount FROM fact_order"
+    corrector:
+      sql: |
+        SELECT dim_region.region_name AS `地区`, SUM(fact_order.order_amount) AS `销售额`
+        FROM fact_order JOIN dim_region ON fact_order.region_id = dim_region.region_id
+        GROUP BY dim_region.region_name
+    executor:
+      columns: [地区, 销售额]
+      rows:
+        - [华北, 128400.0]

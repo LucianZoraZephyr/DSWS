@@ -8,7 +8,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:ui": "node tests/s0_smoke.mjs"
+    "test:ui": "node tests/s0_smoke.mjs && node tests/s6_failures.mjs",
+    "test:ui:s0": "node tests/s0_smoke.mjs",
+    "test:ui:s6": "node tests/s6_failures.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

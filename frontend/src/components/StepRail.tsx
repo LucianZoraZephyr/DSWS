@@ -13,6 +13,7 @@ const STATUS_TEXT: Record<StepVisualStatus, string> = {
   success: "完成",
   error: "失败",
   skipped: "未触发",
+  cancelled: "已取消",
 };
 
 function formatDuration(durationMs: number | null | undefined): string {
@@ -26,6 +27,8 @@ function formatDuration(durationMs: number | null | undefined): string {
  *
  * 旧版是 820×780 的绝对定位画布：窗口一小就裁切，步骤一多就要重算坐标。
  * 新版用普通文档流：天然响应式，新增步骤不需要改任何坐标。
+ *
+ * S6 起多了一个「已取消」态：取消不是失败，也不是完成——它有自己的样子。
  */
 export default function StepRail({ steps, states }: Props) {
   return (
@@ -47,6 +50,9 @@ export default function StepRail({ steps, states }: Props) {
             break;
           case "skipped":
             marker = "–";
+            break;
+          case "cancelled":
+            marker = "⊘";
             break;
           default:
             marker = index + 1;

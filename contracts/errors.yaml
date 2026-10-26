@@ -1,0 +1,148 @@
+# 错误码表：S6 失败通道的唯一事实源
+#
+# 这张表回答三个问题，每一种失败都必须能回答：
+#
+#   1. 它叫什么？          -> code + label
+#   2. 用户该看到什么？     -> class + message
+#   3. 能不能自动校正一次？ -> retryable
+#
+# 路线图 S6 要求的 7 个码是这张表的**下界**，不是全部：
+#
+#   SQL_REJECTED / SQL_SYNTAX / SQL_UNKNOWN_COLUMN /
+#   EMPTY_RESULT  / LLM_REFUSAL  / TIMEOUT / CANCELLED
+#
+# 剩下的 9 个是「让每一种失败都有名字」补齐的：S4 静态校验的 9 个违规码
+# （SQL_EMPTY / SQL_MULTIPLE_STATEMENTS / SQL_NOT_READ_ONLY /
+#  SQL_UNKNOWN_TABLE / SQL_CONSTANT_PROJECTION / SQL_MISSING_ORDER_BY /
+#  SQL_MISSING_LIMIT）加上 S5 执行器的 SQL_EXECUTION_ERROR 与兜底的
+# INTERNAL_ERROR。少了它们，这些失败就只能挤进一个通用码里——那就等于
+# 又回到了「所有失败长得一样」。
+#
+# `class` 决定 UI 怎么渲染，三种取值互不相同：
+#
+#   failure    —— 真的失败了：红框 + 失败步骤红叉
+#   empty      —— 合法但没有数据：空态卡，**不标红**
+#                 （审计 FP-8：空数组是合法语义，不是失败）
+#   cancelled  —— 用户自己停的：取消态，**不算 done，也不算失败**
+#
+# `retryable` 决定要不要走 correct_sql 校正闭环。安全策略的拒绝
+# （SQL_REJECTED）**永远不可重试**：拿被拒的 SQL 去问模型「改一下」，
+# 等于给注入开了重试的口子。
+
+version: 1
+
+# class 的合法取值。代码层按这份清单校验，不允许出现第四种。
+classes:
+  - failure
+  - empty
+  - cancelled
+
+# 校正闭环的策略。与错误码表放在同一份契约里，是因为它们讲的是同一件事：
+# 哪些失败可以重试、重试几次、重试之后要重新过哪些关。
+correction:
+  max_attempts: 1
+  prompt: correct_sql
+  revalidate: true
+  revalidate_with:
+    - guard
+    - policy
+
+codes:
+  # -- 路线图点名的 7 个码 --------------------------------------------------
+  SQL_REJECTED:
+    label: SQL 被安全策略拒绝
+    class: failure
+    retryable: false
+    message: SQL 未通过安全策略校验，已拒绝执行。
+
+  SQL_SYNTAX:
+    label: SQL 语法错误
+    class: failure
+    retryable: true
+    message: SQL 无法被解析，语法不合法。
+
+  SQL_UNKNOWN_COLUMN:
+    label: 引用了不存在的列
+    class: failure
+    retryable: true
+    message: SQL 引用了 schema 里不存在的列。
+
+  EMPTY_RESULT:
+    label: 查询成功但没有数据
+    class: empty
+    retryable: false
+    message: 查询执行成功，但没有符合条件的数据。
+
+  LLM_REFUSAL:
+    label: 模型明确拒答
+    class: failure
+    retryable: false
+    message: 模型判断这个问题无法用现有数据回答，已拒答。
+
+  TIMEOUT:
+    label: 执行超时
+    class: failure
+    retryable: false
+    message: SQL 执行超时，已中止。
+
+  CANCELLED:
+    label: 用户取消
+    class: cancelled
+    retryable: false
+    message: 本次问数已被用户取消。
+
+  # -- S4 静态校验的违规码 --------------------------------------------------
+  SQL_UNKNOWN_TABLE:
+    label: 引用了不存在的表
+    class: failure
+    retryable: true
+    message: SQL 引用了 schema 里不存在的表。
+
+  SQL_NOT_READ_ONLY:
+    label: 不是只读查询
+    class: failure
+    retryable: false
+    message: SQL 不是只读查询，已拒绝。
+
+  SQL_MULTIPLE_STATEMENTS:
+    label: 不是单条语句
+    class: failure
+    retryable: false
+    message: SQL 必须只有一条语句。
+
+  SQL_CONSTANT_PROJECTION:
+    label: 投影了常量
+    class: failure
+    retryable: true
+    message: SELECT 列表里出现了字面量常量或 NULL。
+
+  SQL_MISSING_ORDER_BY:
+    label: 缺 ORDER BY
+    class: failure
+    retryable: true
+    message: 问题有排名意图，SQL 必须带 ORDER BY。
+
+  SQL_MISSING_LIMIT:
+    label: 缺 LIMIT
+    class: failure
+    retryable: true
+    message: 问题限定了名次，SQL 必须带 LIMIT。
+
+  SQL_EMPTY:
+    label: SQL 为空
+    class: failure
+    retryable: false
+    message: 生成结果是空的，没有可执行的 SQL。
+
+  # -- S5 执行器与兜底 ------------------------------------------------------
+  SQL_EXECUTION_ERROR:
+    label: 数据库执行出错
+    class: failure
+    retryable: false
+    message: 数据库执行这条 SQL 时出错。
+
+  INTERNAL_ERROR:
+    label: 系统内部错误
+    class: failure
+    retryable: false
+    message: 系统内部错误，本次问数未能完成。

@@ -13,20 +13,14 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 
 import { chromium } from "playwright-core";
 
-const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:5273";
-const CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/usr/bin/google-chrome",
-  "/usr/bin/google-chrome-stable",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter(Boolean);
+import { launchArgs, resolveChromePath } from "./chrome.mjs";
 
-const executablePath = CANDIDATES.find((candidate) => existsSync(candidate));
+const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:5273";
+
+const executablePath = resolveChromePath();
 
 if (!executablePath) {
   console.error(
@@ -38,7 +32,7 @@ if (!executablePath) {
 const browser = await chromium.launch({
   executablePath,
   headless: true,
-  args: ["--no-sandbox"],
+  args: launchArgs(),
 });
 
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });

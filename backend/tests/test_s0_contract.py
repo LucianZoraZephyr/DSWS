@@ -76,6 +76,12 @@ def test_every_event_matches_contract() -> None:
 
 
 def test_step_lifecycle() -> None:
+    """每个步骤都要有结论，条件步骤要么跑要么显式 skipped。
+
+    S6 起 `/api/query` 跑的是**真的**流水线（S0 是假流，永远成功），
+    所以非条件步骤的最后一条事件可能是 `success`，也可能是 `error`
+    （例如没配只读账号，执行步骤就会失败）——但**不能没有结论**。
+    """
     events = parse_sse(client.post("/api/query", json={"query": "test"}).text)
     progress = [event for event in events if event["type"] == "progress"]
 
@@ -84,19 +90,36 @@ def test_step_lifecycle() -> None:
         by_step.setdefault(event["step"], []).append(event)
 
     for step in STEPS:
-        step_events = by_step[step["id"]]
+        step_events = by_step.get(step["id"], [])
+        statuses = [event["status"] for event in step_events]
         if step.get("conditional"):
-            assert [event["status"] for event in step_events] == ["skipped"]
-        else:
-            assert [event["status"] for event in step_events] == ["running", "success"]
+            # 条件步骤：跑了就 running → 终态，没跑就显式 skipped。
+            # 绝不能「什么都没有」——那就是永远灰着的 pending（审计 D4）。
+            assert statuses in (
+                ["skipped"],
+                ["running", "success"],
+                ["running", "error"],
+            ), f"{step['id']} 的状态序列不对：{statuses}"
+        elif statuses:
+            # 跑过的步骤必须有结论，不能半途而废。
+            assert statuses[0] == "running", f"{step['id']} 应当先报 running"
+            assert statuses[-1] in ("success", "error"), (
+                f"{step['id']} 必须有结论，不能半途而废：{statuses}"
+            )
             assert step_events[-1]["duration_ms"] is not None
             assert step_events[-1]["duration_ms"] >= 0
+        # 没有事件的步骤 = 流水线在它之前就停了，它压根没开始。
 
-    assert events[-1]["type"] == "result"
-    assert events[-1]["data"]["columns"]
+    # 流必须以 result 或 error 收尾——没有第三种结局。
+    assert events[-1]["type"] in ("result", "error")
 
 
 def test_skipped_only_for_conditional_steps() -> None:
+    """`skipped` 是条件步骤的专属状态。
+
+    反过来也成立：条件步骤没跑的时候必须**显式** skipped，不能留一个
+    永远灰着的 pending（审计 D4）。
+    """
     events = parse_sse(client.post("/api/query", json={"query": "test"}).text)
     skipped = {
         event["step"]
@@ -104,7 +127,18 @@ def test_skipped_only_for_conditional_steps() -> None:
         if event["type"] == "progress" and event["status"] == "skipped"
     }
     conditional = {step["id"] for step in STEPS if step.get("conditional")}
-    assert skipped == conditional
+    assert skipped <= conditional, f"非条件步骤不该 skipped：{sorted(skipped)}"
+
+    for step in STEPS:
+        if not step.get("conditional"):
+            continue
+        states = [
+            event["status"]
+            for event in events
+            if event["type"] == "progress" and event["step"] == step["id"]
+        ]
+        assert states, f"条件步骤 {step['id']} 必须有状态，不能空着"
+        assert states[-1] in ("skipped", "success", "error")
 
 
 def test_unknown_event_is_rejected() -> None:
@@ -148,16 +182,37 @@ def test_good_duration_is_accepted(event: dict) -> None:
     jsonschema.validate(instance=event, schema=SCHEMA)
 
 
-def test_error_event_requires_step() -> None:
+def test_error_event_requires_step_and_class() -> None:
+    """error 事件必须带 `step` 与 `class`。
+
+    `class` 是 S6 加的：前端靠它区分「红框」「空态」「取消」。少了它，
+    失败就只剩一种长相——那正是旧系统的毛病。
+    """
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(
-            instance={"type": "error", "code": "SQL_REJECTED", "message": "x"},
+            instance={
+                "type": "error",
+                "code": "SQL_REJECTED",
+                "class": "failure",
+                "message": "x",
+            },
+            schema=SCHEMA,
+        )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance={
+                "type": "error",
+                "code": "SQL_REJECTED",
+                "message": "x",
+                "step": None,
+            },
             schema=SCHEMA,
         )
     jsonschema.validate(
         instance={
             "type": "error",
             "code": "SQL_REJECTED",
+            "class": "failure",
             "message": "x",
             "step": None,
         },

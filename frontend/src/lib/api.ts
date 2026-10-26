@@ -2,6 +2,9 @@ import type {
   AgentEvent,
   CellValue,
   ColumnType,
+  ErrorClass,
+  ErrorDetail,
+  ErrorTableResponse,
   ProgressStatus,
   ResultColumn,
 } from "../types";
@@ -28,6 +31,12 @@ const PROGRESS_STATUS: ReadonlySet<string> = new Set([
   "skipped",
 ]);
 
+const ERROR_CLASSES: ReadonlySet<string> = new Set([
+  "failure",
+  "empty",
+  "cancelled",
+]);
+
 const COLUMN_TYPES: ReadonlySet<string> = new Set([
   "string",
   "number",
@@ -42,6 +51,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function fail(message: string): never {
   throw new ApiError("PROTOCOL_ERROR", message);
+}
+
+const DETAIL_KEYS = [
+  "reason_code",
+  "reason",
+  "sql",
+  "original_sql",
+  "corrected_sql",
+  "attempts",
+  "rows",
+  "request_id",
+] as const;
+
+/**
+ * 错误细节。字段名由契约定死，多余的键直接报错——不能让后端悄悄塞
+ * 一个前端看不懂的字段进来。
+ */
+function parseDetail(value: unknown): ErrorDetail | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) fail("error.detail 必须是对象");
+  const detail: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (!DETAIL_KEYS.includes(key as (typeof DETAIL_KEYS)[number])) {
+      fail(`error.detail 出现未定义的键：${key}`);
+    }
+    detail[key] = value[key];
+  }
+  return detail as ErrorDetail;
 }
 
 /**
@@ -140,11 +177,22 @@ export function parseAgentEvent(value: unknown): AgentEvent {
       if (!("step" in value) || (value.step !== null && typeof value.step !== "string")) {
         fail("error.step 必须是字符串或 null");
       }
+      // class 是必填：前端靠它区分「红框」「空态」「取消」。
+      // 没有它，失败就只剩一种长相——那正是旧系统的毛病。
+      if (!("class" in value) || typeof value.class !== "string") {
+        fail("error.class 必须是字符串");
+      }
+      if (!ERROR_CLASSES.has(value.class)) {
+        fail(`未知的 error.class：${String(value.class)}`);
+      }
+      const detail = parseDetail(value.detail);
       return {
         type: "error",
         code,
+        class: value.class as ErrorClass,
         message,
         step: value.step as string | null,
+        ...(detail ? { detail } : {}),
       };
     }
 
@@ -217,16 +265,58 @@ export async function fetchSteps(): Promise<{
   };
 }
 
+/**
+ * 拉取错误码表。
+ *
+ * 前端**不硬编码**码的含义：`SQL_REJECTED` 显示成「SQL 被安全策略拒绝」
+ * 这件事由后端从 `contracts/errors.yaml` 下发。契约只有一份。
+ */
+export async function fetchErrorCodes(): Promise<ErrorTableResponse> {
+  const response = await fetch("/api/errors");
+  if (!response.ok) {
+    throw new ApiError(
+      "HTTP_ERROR",
+      `加载错误码表失败：HTTP ${response.status}`,
+    );
+  }
+  return (await response.json()) as ErrorTableResponse;
+}
+
+/**
+ * 取消一次问数。
+ *
+ * 取消是一个**独立状态**，不是「完成」：服务端会真的停下这次问数，
+ * 前端把界面标成「已取消」，步骤条停止推进。
+ */
+export async function cancelQuery(requestId: string): Promise<boolean> {
+  const response = await fetch("/api/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId }),
+  });
+  if (!response.ok) {
+    throw new ApiError("HTTP_ERROR", `取消失败：HTTP ${response.status}`);
+  }
+  const payload = (await response.json()) as { cancelled: boolean };
+  return Boolean(payload.cancelled);
+}
+
+export interface StreamOptions {
+  signal?: AbortSignal;
+  /** 后端在响应头里给出 request_id，前端靠它取消这次问数。 */
+  onRequestId?: (requestId: string) => void;
+}
+
 export async function streamQuery(
   query: string,
   onEvent: (event: AgentEvent) => void,
-  signal?: AbortSignal,
+  options: StreamOptions = {},
 ): Promise<void> {
   const response = await fetch("/api/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
-    signal,
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -247,6 +337,9 @@ export async function streamQuery(
       detail,
     );
   }
+
+  const requestId = response.headers.get("X-Request-Id");
+  if (requestId) options.onRequestId?.(requestId);
 
   if (!response.body) {
     throw new ApiError("EMPTY_BODY", "响应没有 body");

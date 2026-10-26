@@ -1,7 +1,7 @@
 ---
 name: correct_sql
-runtime: false
-runtime_note: "S6（失败通道）才启用；S4 只做「生成 + 静态校验」，不进入校正闭环。本文件先落契约，运行时开关为 false。"
+runtime: true
+runtime_note: "S6（失败通道）起进入运行时：校验失败且错误可重试时，校正器用它做最小必要修正。校正结果**必须重新过一遍**静态校验与安全策略——校正不是绕过安全检查的后门。"
 legacy_source: shopkeeper-agent/prompts/correct_sql.prompt
 description: 根据 SQL 错误信息做最小必要修正，输出同样受 sql_or_refusal 契约约束。
 slots:

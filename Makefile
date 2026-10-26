@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live baseline
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live stage6 stage6-ui baseline
 
 install:
 	cd backend && uv sync --frozen
@@ -104,3 +104,30 @@ stage5-live:
 	@echo "== S5 · 两屏对比：旧系统执行 / 新系统拒绝 =="
 	cd backend && uv run python -m app.scripts.security --demo
 	@echo "S5 LIVE PASS"
+
+# S6 硬验收：错误码表 + 6 类失败场景 + 校正闭环 + 取消
+# 前置：**不需要** MySQL / LLM。失败场景由 fixtures/failures/scenarios.yaml
+# 驱动，校验、安全策略、校正闭环、SSE 协议全都是真代码——只替换了模型与
+# 数据库这两个外部依赖，所以 6 类失败既真实又可复现。
+stage6:
+	@echo "== S6 · 失败通道门禁（6 类失败 + 错误码表） =="
+	cd backend && uv run python -m app.scripts.failures --check
+	@echo "== S6 · 错误码表 =="
+	cd backend && uv run python -m app.scripts.failures --table
+	@echo "== S6 · 失败场景表 =="
+	cd backend && uv run python -m app.scripts.failures --scenarios
+	@echo "== S6 · 失败通道测试（错误码表 / 校正闭环 / 编排 / API / 场景） =="
+	cd backend && uv run pytest -q tests/agent
+	@echo "== S6 · 前端协议单测 =="
+	cd frontend && npm run test
+	@echo "== S6 · 前端类型检查 + 构建 =="
+	cd frontend && npm run build
+	@echo "== S6 · 全部后端测试（S0 + S1 + S2 + S3 + S4 + S5 + S6） =="
+	cd backend && uv run pytest -q
+	@echo "S6 PASS"
+
+# S6 浏览器验收：6 类失败各一个用例 + 取消
+# 前置：需要 Chrome / Edge（Windows 上用 Edge 也行）。
+# 场景应用与生产应用共用同一套 HTTP / SSE 管道，只替换模型与数据库。
+stage6-ui:
+	./scripts/stage6-ui.sh

@@ -21,6 +21,7 @@ const result = {
 const error = {
   type: "error",
   code: "SQL_REJECTED",
+  class: "failure",
   message: "拒绝执行",
   step: "validate_sql",
 } as const;
@@ -92,8 +93,88 @@ describe("parseAgentEvent", () => {
 
   it("拒绝缺少 step 的 error", () => {
     expect(() =>
-      parseAgentEvent({ type: "error", code: "X", message: "y" }),
+      parseAgentEvent({
+        type: "error",
+        code: "X",
+        class: "failure",
+        message: "y",
+      }),
     ).toThrow(/error.step/);
+  });
+
+  it("拒绝缺少 class 的 error", () => {
+    // class 决定界面怎么渲染：红框 / 空态 / 取消。少了它，失败就只剩
+    // 一种长相——那正是旧系统的毛病。
+    expect(() =>
+      parseAgentEvent({ type: "error", code: "X", message: "y", step: null }),
+    ).toThrow(/error.class/);
+  });
+
+  it("拒绝未知的 class", () => {
+    expect(() =>
+      parseAgentEvent({
+        type: "error",
+        code: "X",
+        class: "boom",
+        message: "y",
+        step: null,
+      }),
+    ).toThrow(/未知的 error.class/);
+  });
+
+  it("接受三种 class", () => {
+    for (const klass of ["failure", "empty", "cancelled"]) {
+      expect(
+        parseAgentEvent({
+          type: "error",
+          code: "X",
+          class: klass,
+          message: "y",
+          step: null,
+        }),
+      ).toEqual({
+        type: "error",
+        code: "X",
+        class: klass,
+        message: "y",
+        step: null,
+      });
+    }
+  });
+
+  it("解析错误细节", () => {
+    const parsed = parseAgentEvent({
+      type: "error",
+      code: "SQL_REJECTED",
+      class: "failure",
+      message: "y",
+      step: "validate_sql",
+      detail: {
+        reason_code: "SQL_FORBIDDEN_CONSTRUCT",
+        original_sql: "SELECT 1",
+        attempts: 1,
+      },
+    });
+    expect(parsed).toMatchObject({
+      detail: {
+        reason_code: "SQL_FORBIDDEN_CONSTRUCT",
+        original_sql: "SELECT 1",
+        attempts: 1,
+      },
+    });
+  });
+
+  it("拒绝未定义的细节字段", () => {
+    expect(() =>
+      parseAgentEvent({
+        type: "error",
+        code: "X",
+        class: "failure",
+        message: "y",
+        step: null,
+        detail: { nope: 1 },
+      }),
+    ).toThrow(/未定义的键/);
   });
 
   it("拒绝非法列类型与非法单元格", () => {

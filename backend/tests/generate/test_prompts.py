@@ -69,11 +69,15 @@ def test_output_schema_is_defined_in_contract(name: str) -> None:
     assert spec.output_schema in known_output_schemas()
 
 
-def test_only_generate_sql_is_runtime() -> None:
-    """S3 已经把 5 个 recall/filter 步骤确定性化，运行时只有 generate_sql。"""
+def test_only_generate_and_correct_are_runtime() -> None:
+    """S3 把 5 个 recall/filter 步骤确定性化了；S6 起校正也进了运行时。
+
+    运行时的提示词只有两个：`generate_sql`（生成）与 `correct_sql`（校正）。
+    其余 5 个仍是对照资产——「不调用」不等于「不校验」。
+    """
     runtime = runtime_prompts()
-    assert [spec.name for spec in runtime] == ["generate_sql"]
-    for name in EXPECTED_PROMPT_NAMES - {"generate_sql"}:
+    assert {spec.name for spec in runtime} == {"generate_sql", "correct_sql"}
+    for name in EXPECTED_PROMPT_NAMES - {"generate_sql", "correct_sql"}:
         assert get_prompt(name).runtime is False
 
 
