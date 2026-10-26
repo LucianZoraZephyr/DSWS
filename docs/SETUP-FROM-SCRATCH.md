@@ -1,8 +1,8 @@
-# 从零搭建 rebuild（S0–S5 已验证版）
+# 从零搭建 rebuild（S0–S6 已验证版）
 
-> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL、S5 安全边界**。
+> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL、S5 安全边界、S6 失败通道**。
 > **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；S4 / S5 与本手册位于 `main`。
-> **不包含**：S6 失败通道、S7 前端收口、S8 性能。
+> **不包含**：S7 前端收口、S8 性能。
 >
 > 这份手册刻意把三件事分开写：
 >
@@ -41,17 +41,27 @@ make stage4
 
 # 7) S5：安全边界（不需要三存储）
 make stage5
+
+# 8) S6：失败通道（不需要三存储，也不需要 LLM）
+make stage6
 ```
 
-如果上面的命令全部打印 `PASS`，说明 S0–S5 的代码级验收通过。
+如果上面的命令全部打印 `PASS`，说明 S0–S6 的代码级验收通过。
 
 > S4 单独拿出来也能跑：它只到「生成 + 静态校验」，上下文由契约离线裁剪，
 > **不需要 MySQL / ES / Qdrant，也不需要 API key 或网络**。
 >
 > S5 的门禁也一样不需要数据库：安全策略只依赖契约与 sqlglot。
 > 只有只读账号的开通 / 验证与两屏对比需要 MySQL（`make stage5-live`）。
+>
+> S6 的门禁**既不需要数据库也不需要 LLM**：6 类失败由
+> `fixtures/failures/scenarios.yaml` 驱动，只替换模型与数据库两个外部依赖，
+> 校验、策略、校正、事件全是真代码。浏览器验收 `make stage6-ui` 需要 Chrome / Edge。
 
-> ⚠️ 但“S3 通过”不等于“前端已经能真实问数”。当前 `/api/query` 仍是 S0 的假 SSE，S3 只通过 CLI 调用。详见第 7 节。
+> ⚠️ 但“S3 通过”不等于“前端已经能真实问数”。`/api/query` 从 S6 起跑的是**真的**
+> 流水线（上下文 → 生成 → 校验 → 校正 → 执行），但真实召回（S3）与真实数据库
+> 还没接上去——没有 MySQL 时它会以一条诚实的 `INTERNAL_ERROR` 收尾，而不是编一份假数据。
+> 详见第 2.10 节与第 7 节。
 
 ---
 
@@ -544,9 +554,67 @@ make stage5-live
 > `REBUILD_MYSQL_PASSWORD`，即旧系统那个 ALL PRIVILEGES 账号），
 > 因为它要复现旧系统的行为。新系统自己的执行路径用的是 `dw_reader`。
 
-### 2.9 启动开发服务（可选）
+### 2.9 S6：失败通道（不需要三存储，也不需要 LLM）
 
-只有想看 S0 的假 SSE / 步骤条时才需要。
+```bash
+cd "<你的目录>/A020-电商问数智能体实战教程fixed/code/rebuild"
+make stage6
+```
+
+`make stage6` 做五件事：
+
+1. **失败通道门禁**：`python -m app.scripts.failures --check`——
+   6 类失败各跑一遍，结局必须与夹具里 `expect` 写的一致（错误码 / 类别 /
+   失败步骤三项都对），外加「路线图点名的 7 个通道码都在错误码表里」。
+2. **错误码表**：`python -m app.scripts.failures --table`——
+   16 个码，带名称 / 类别 / 可否重试。
+3. **失败场景表**：`python -m app.scripts.failures --scenarios`。
+4. **失败层测试**：`pytest -q tests/agent`（93 条）+ 前端协议单测 + 构建。
+5. **全量后端测试**。
+
+单看一类失败：
+
+```bash
+cd backend
+uv run python -m app.scripts.failures --scenarios
+# | 场景 | 名称 | 期望 | 类别 | 失败步骤 |
+# | `sql_rejected` | SQL 被安全策略拒绝 | SQL_REJECTED | failure | validate_sql |
+# | `empty_result` | 查询成功但没有数据 | EMPTY_RESULT | empty | run_sql |
+```
+
+浏览器验收（需要 Chrome / Edge，Windows 上用 Edge 也行）：
+
+```bash
+make stage6-ui
+```
+
+它自起一个隔离的**场景应用**（默认 8102）与前端（5275），跑两个无头浏览器
+用例：正常路径，以及 6 类失败各一个 + 取消。跑完自动清理。
+
+#### 为什么 S6 不需要 MySQL，也不需要 LLM
+
+6 类失败由 `fixtures/failures/scenarios.yaml` 驱动。**场景应用与生产应用共用
+同一套 HTTP / SSE 管道**（`backend/app/main.py` 的 `create_app`），只把编排器的
+两个外部依赖换成夹具里的替身：
+
+| | 生产 | 场景 |
+|---|---|---|
+| 上下文 / 提示词 / 静态校验 / 安全策略 / 校正闭环 / SSE | 真 | 真 |
+| 模型 | 真 / 确定性 | 夹具 |
+| 数据库 | 只读账号 | 夹具 |
+
+所以屏幕上的每一个红叉都对应一次**真实的判定**，而失败又**可复现**——
+不能指望真模型恰好吐出一条坏 SQL。
+
+#### 校正闭环的验收
+
+`make stage6` 里最要紧的一条是：**校正后的 SQL 必须再次过 S5 策略**。
+校正器返回一条带写操作的 SQL、或一条 UNION，闭环都必须挡下来
+（`tests/agent/test_orchestrator.py` 里有对应的负例）。
+
+### 2.10 启动开发服务（可选）
+
+想看步骤条依次点亮、失败各有各的样子时才需要。
 
 终端 1：
 
@@ -566,16 +634,32 @@ make dev-frontend
 
 ```bash
 curl -sS http://127.0.0.1:8100/api/health
-# {"status":"ok","stage":"S0"}
+# {"status":"ok","stage":"S6"}
 
 curl -sS http://127.0.0.1:5273/api/health
-# 通过 Vite 代理，同样返回 stage:S0
+# 通过 Vite 代理，同样返回 stage:S6
 ```
 
-打开 `http://127.0.0.1:5273` 可以看到步骤条依次点亮，但结果是 **S0 假数据**，不是 S3 检索结果。
+打开 `http://127.0.0.1:5273` 可以看到步骤条依次点亮。**S6 起 `/api/query` 跑的是
+真的流水线**（上下文 → 生成 → 校验 → 校正 → 执行），不是 S0 的假流：
 
-> ✅ 本机已验证：当前 `5273` 返回 200，`8100/api/health` 和 `5273/api/health` 都返回
-> `{"status":"ok","stage":"S0"}`。
+- 没配只读账号（`REBUILD_DW_RO_PASSWORD`）时，执行步骤会**失败**，流以一条
+  `INTERNAL_ERROR` 收尾——**诚实的失败**，不是编一份假数据；
+- 想看 6 类失败各是什么样子，用**场景应用**（只替换模型与数据库）：
+
+```bash
+# 终端 1
+cd backend && uv run python -m app.scenarios.app --port 8102
+
+# 终端 2
+cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
+```
+
+然后在页面上提问「场景:sql_rejected 华北销售额」之类的话（场景前缀由场景应用
+剥掉，流水线拿到的仍是真实问题）。
+
+> ✅ 本机已验证：当前 `5273` 返回 200，`8100/api/health` 与 `5273/api/health` 都返回
+> `{"status":"ok","stage":"S6"}`。
 >
 > ℹ️ Vite 配置了 `host: "0.0.0.0"`，所以局域网可以用
 > `http://<宿主机IP>:5273` 打开；`/api` 由 Vite 在服务器侧代理到
@@ -594,17 +678,21 @@ curl -sS http://127.0.0.1:5273/api/health
 | S4 | `make stage4` | 否 | 7 个提示词槽位校验 + sqlglot AST 静态校验 + 10 题基线；113 测试 |
 | S5 | `make stage5` | 否 | AST 级安全策略 + 36 条注入语料 100% 拒绝 + 11 条零误杀；173 测试 |
 | S5 实战 | `make stage5-live` | 是（只要 MySQL） | 只读账号开通 / 验证 + 两屏对比（旧执行 / 新拒绝） |
+| S6 | `make stage6` | 否 | 错误码表 + 6 类失败 + 校正闭环 + 取消；93 测试 |
+| S6 浏览器 | `make stage6-ui` | 否（要浏览器） | 6 类失败各一个用例 + 取消，UI 状态互不相同 |
 
 当前测试总数：
 
-- 后端：`19 + 40 + 16 + 38 + 113 + 173 = 399`
-- 前端：`18`
-- 全量后端默认：`369 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
+- 后端：`19 + 40 + 16 + 38 + 113 + 173 + 93 = 492`（其中 30 条按需跳过，
+  实际执行的断言是 462 条）
+- 前端：`23`（协议单测）+ 2 个无头浏览器用例
+- 全量后端默认：`462 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
   5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过，
   2 条是 S5 里「这一题是拒答，不产生 SQL」的按需跳过）
 - `make stage3` 的 S3 集成：`38 passed`
 - `make stage4` 的生成层：`108 passed, 5 skipped`
 - `make stage5` 的安全层：`171 passed, 2 skipped`
+- `make stage6` 的失败层：`93 passed`
 
 ---
 
@@ -733,6 +821,9 @@ uv run python -m app.build_meta_knowledge --dry-run
 | `make stage5-live` 报「缺少环境变量 REBUILD_DW_RO_PASSWORD」 | 只读账号的密码**故意不在仓库里** | `export REBUILD_DW_RO_PASSWORD='<你自己的密码>'` 再跑 |
 | `make stage5-live` 连不上 3306 | MySQL 没起 | 按 2.4 只启动 mysql；`dw` 库要由 `fixtures/dw.sql` 装载 |
 | `make stage5-live` 的 `--demo` 报权限不足 | `--demo` 需要一个有权限的账号来复现旧系统行为 | 确认 `REBUILD_MYSQL_USER` / `REBUILD_MYSQL_PASSWORD` 是那个 ALL PRIVILEGES 账号 |
+| `make stage6-ui` 报「找不到 Chrome/Edge」 | playwright-core 不自带浏览器 | 装 Chrome 或 Edge，或设 `CHROME_PATH=/path/to/chrome` |
+| `make stage6-ui` 报端口被占用 | 8102 / 5275 被别的进程占了 | `API_PORT=8202 WEB_PORT=5375 make stage6-ui` |
+| 页面上问什么都报 `INTERNAL_ERROR` | 没配只读账号，执行阶段连不上库 | 这是**诚实的失败**；配 `REBUILD_DW_RO_PASSWORD` 并跑 `make stage5-live` 开通账号，或用场景应用看 6 类失败 |
 
 ---
 
@@ -753,6 +844,15 @@ uv run python -m app.build_meta_knowledge --dry-run
 - S5 的策略：每个原因码都有能复现它的语料（多语句 / 注释绕过 / 写操作 /
   集合运算 / 危险函数 / 白名单外表 / 白名单外列）；执行的 SQL 与被校验的 SQL
   是同一条（去注释 + 自动 LIMIT）。
+- `make stage6`：6 类失败各跑一遍，结局与夹具逐项吻合（错误码 / 类别 / 失败
+  步骤）；错误码表 16 个码，路线图点名的 7 个全在；失败层 93 passed；
+  全量后端 462 passed / 30 skipped；PASS。
+- `make stage6-ui`（真实浏览器，Edge）：6 类失败给出 **6 种互不相同**的界面状态
+  （SQL_REJECTED / SQL_SYNTAX / SQL_UNKNOWN_COLUMN / EMPTY_RESULT /
+  LLM_REFUSAL / TIMEOUT），空结果**不**标红，取消后状态是「已取消」且步骤条
+  停止推进；同一轮里 S0 的正常路径冒烟也一起通过。
+- S6 的校正闭环：校正后的 SQL **重新过**静态校验与安全策略——校正器返回写操作
+  或 UNION 都被挡下（`SQL_REJECTED`），执行器一次都没被调用；校正最多 1 次。
 - 依赖补全：`make`（winget `ezwinports.make` 4.4.1）、`frontend/node_modules`
   （`npm ci`）、后端新增 `sqlglot`（AST 校验）与 `jsonschema`（输出形状校验）。
 
@@ -777,15 +877,21 @@ uv run python -m app.build_meta_knowledge --dry-run
 - `make stage0-ui` 的真实 Chrome 冒烟：脚本存在，但本轮没有重新跑。
 - 带鉴权的 ES/Qdrant：当前代码只发 URL，没有 API key/TLS 参数，不能只改 URL。
 - 真实 bge embedding：当前只支持 `hash-ngram-v1`，S3 召回质量有限。
-- S3 接入 `/api/query`：尚未接入，前端仍是 S0 假流。
-- S4 接入 `/api/query`：同样**没有**接线。S4 只到 CLI 与 `make stage4`，
-  前端要能真实问数要等 S6（失败通道）+ S7（前端收口）。
+- 真实召回（S3）接入 `/api/query`：S6 起 `/api/query` 跑的是**真的**流水线
+  （上下文 → 生成 → 校验 → 校正 → 执行），但上下文仍由契约**离线裁剪**，
+  没有接 S3 的向量召回。接真召回需要三存储。
+- 真实数据库接入 `/api/query`：默认执行器是 S5 的只读账号执行器；没有
+  `REBUILD_DW_RO_PASSWORD` 时它会诚实地以 `INTERNAL_ERROR` 收尾。
+  端到端跑通需要 MySQL + `make stage5-live`（本轮未跑）。
 - S4 的真实 LLM 通路（`HttpLlmGenerator`）：接口与校验都在，但没有对着
   真实端点跑过；默认走的是确定性生成器。
 - S5 的只读账号与两屏对比（`make stage5-live`）：当前 shell 没有运行中的
   MySQL，因此**没有**在这里端到端跑过。离线门禁（策略 / 语料 / 零误杀）
   与执行器、账号的假连接测试都已通过。
-- S6–S8：不存在。
+- S6 的真实 LLM 校正通路（`LlmCorrector` + 真实端点）：接口、提示词与校验都在，
+  但没有对着真实端点跑过；默认走的是确定性生成器，校正器在没配 LLM 时**不假装
+  能校正**——`correct_sql` 步骤会显式标成「未触发」。
+- S7–S8：不存在。
 
 ### ℹ️ 明确的边界
 
@@ -799,22 +905,20 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ## 8. 下一步
 
-当前停点就是 S5。下一步是 **S6：失败通道**：
+当前停点就是 S6。下一步是 **S7：前端收口**——「从契约生成，不从记忆硬编码」：
 
-- `correct_sql`：最多 1 次重试、**校正后重新校验**、保留原始 SQL、清空旧 `error`；
-- 错误码表：`SQL_REJECTED` / `SQL_SYNTAX` / `SQL_UNKNOWN_COLUMN` / `EMPTY_RESULT` /
-  `LLM_REFUSAL` / `TIMEOUT` / `CANCELLED`（S5 已经把 `SQL_REJECTED` 与
-  `TIMEOUT` 落地了，见 `backend/app/security/executor.py`）；
-- SSE `error` 事件真正可达；前端：失败步骤红叉 + 红框 + 可复制错误；
-- 取消 → `cancelled`（不是 `done`）。
+- 前端的 TS 类型从 `contracts/sse.schema.json` 自动生成，并加 diff 检查
+  （现在还是手写版，靠 Vitest 用例 + 后端契约测试共同守住）；
+- 步骤目录、错误码表都从 `/api/steps` / `/api/errors` 拉，前端零硬编码
+  （S6 已经做到「码的含义不硬编码」，但**类型**还是手写的）；
+- 13 个界面缺口按 `audit-frontend-contract.md` 逐条收口；
+- 补齐 `docs/screenshots/` 里的失败态截图（路线图的 Demo 要录 5 种失败态）。
 
-S4 已经把「只读 / 单语句 / 列存在 / 无常量投影 / 排名有 ORDER BY」做成代码级
-守卫（`backend/app/generate/guard.py`），S5 又在上面叠了一层**安全策略**
-（`backend/app/security/policy.py`）：白名单、只读账号、超时、自动 LIMIT，
-以及一整套注入语料。
+S6 已经把「只读 / 单语句 / 列存在 / 无常量投影 / 排名有 ORDER BY」做成代码级
+守卫（S4），又叠了一层**安全策略**（S5：白名单、只读账号、超时、自动 LIMIT、
+一整套注入语料），最后把它们**接进一条真的链路**（S6：生成 → 校验 → 校正 →
+再校验 → 执行），每一种失败都有名字、有 UI、有测试。
 
-S6 要做的是把它们**接进一条真的链路**：生成 → 策略 → 执行 → 出错 → 校正 →
-再校验 → 再执行，每一种失败都有名字、有 UI、有测试。
-
-在 S6/S7 落地之前，仍然不要承诺“前端能真实问数”——`/api/query` 至今
-还是 S0 的假 SSE。
+> 但仍然不要承诺「前端能真实问数」：`/api/query` 跑的是真流水线，**上下文却是
+> 契约离线裁剪的**，真实召回（S3）与真实数据库还没接上。前端要能问真问题，
+> 还要等 S7 与 S8。

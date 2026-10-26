@@ -19,7 +19,7 @@
 | **S3 检索** | ✅ 完成 | `make stage3` |
 | **S4 生成 SQL** | ✅ 完成 | `make stage4` |
 | **S5 安全边界** | ✅ 完成 | `make stage5` |
-| S6 失败通道 | ⬜ 待做 | `make stage6` |
+| **S6 失败通道** | ✅ 完成 | `make stage6` |
 | S7 前端收口 | ⬜ 待做 | `make stage7` |
 | S8 性能 | ⬜ 待做 | `make stage8` |
 
@@ -639,6 +639,190 @@ make stage5-live                            # 开通 + 验证 + 两屏对比
 
 ---
 
+## S6 做了什么
+
+**一句话**：让每一种失败都有名字、有 UI、有测试——校正闭环 + 错误通道端到端打通。
+
+```
+一次问数
+  -> 上下文 8 阶段   app/generate/context.py（真的 8 个阶段，不是假事件）
+  -> generate_sql    app/generate/pipeline.py
+  -> validate_sql    静态校验（AST）+ 安全策略（AST）
+  -> [correct_sql]   可重试的错误才进；最多 1 次；改完**重新校验**
+  -> run_sql         只读账号 + 超时
+  -> result / error  流一定以其中之一收尾
+```
+
+S6 把 S0 的**假流**换成了真流水线。原来那条流永远成功，所以审计里最刺眼
+的三类静默失败——伪 SQL 被当成一行数据、召回为空也算 success、错误被吞掉
+——在它上面一个都测不出来。
+
+### 错误码表：每个失败都有名字
+
+`contracts/errors.yaml` 是唯一事实源。路线图点名的 7 个码是这张表的**下界**：
+
+| 错误码 | 名称 | 类别 | 可重试 | 来自哪一步 |
+|---|---|---|---|---|
+| `SQL_REJECTED` | SQL 被安全策略拒绝 | failure | 否 | validate_sql |
+| `SQL_SYNTAX` | SQL 语法错误 | failure | 是 | validate_sql |
+| `SQL_UNKNOWN_COLUMN` | 引用了不存在的列 | failure | 是 | validate_sql |
+| `EMPTY_RESULT` | 查询成功但没有数据 | **empty** | 否 | run_sql |
+| `LLM_REFUSAL` | 模型明确拒答 | failure | 否 | generate_sql |
+| `TIMEOUT` | 执行超时 | failure | 否 | run_sql |
+| `CANCELLED` | 用户取消 | **cancelled** | 否 | 任意一步 |
+
+另外 9 个码是「让每一种失败都有名字」补齐的：S4 静态校验的 9 个违规码
+（`SQL_EMPTY` / `SQL_MULTIPLE_STATEMENTS` / `SQL_NOT_READ_ONLY` /
+`SQL_UNKNOWN_TABLE` / `SQL_CONSTANT_PROJECTION` / `SQL_MISSING_ORDER_BY` /
+`SQL_MISSING_LIMIT`），加上 S5 执行器的 `SQL_EXECUTION_ERROR` 与兜底的
+`INTERNAL_ERROR`。少了它们，这些失败只能挤进一个通用码——那就等于又回到了
+「所有失败长得一样」。
+
+**一条映射规则**：拒答码在表里就是它自己，不在就是 `LLM_REFUSAL`。
+于是 S4 的 9 个违规码各自保留名字，而生成器主动拒答的
+`OUT_OF_RANGE` / `UNSUPPORTED_INTENT` / … 统一归到 `LLM_REFUSAL`
+（原码留在 `detail.reason_code` 里）——它们是**模型的判断**，不是系统的
+失败类别。
+
+### 三种失败类别，长得不一样
+
+`class` 决定界面怎么渲染，**不是**码决定：
+
+| class | 界面 | 步骤条 |
+|---|---|---|
+| `failure` | 红框 + 错误码 + 可复制详情 | 失败步骤**红叉** |
+| `empty` | 虚线空态卡 | 执行步骤**保持绿色** |
+| `cancelled` | 中性卡 | 正在跑的步骤标「已取消」 |
+
+`empty` 单独一类是刻意的。审计 FP-8 写得很清楚：
+
+> ⚠️ 注意**不能**把空数组直接标成红色错误 —— `[]` 是**合法语义**
+> （库里真的没这批数据），改成错误态会破坏正常场景。
+
+所以空结果有**自己的码**（`EMPTY_RESULT`）和**自己的界面**，但它不标红：
+库里没有这批数据不是系统的错。
+
+### 校正闭环：不是绕过安全检查的后门
+
+旧系统也有一个 `correct_sql` 节点，但有三个问题：没有次数上限、校正结果
+不复查、失败被吞掉（`state["error"]` 还留着上一轮的旧错误）。
+
+新的闭环：
+
+```
+校验失败（可重试的码）
+  -> correct_sql：最多 1 次（契约里的 correction.max_attempts）
+  -> 校正后的 SQL **重新过两道关**：静态校验 + 安全策略
+  -> 通过 → 清空旧 error，继续执行
+  -> 不通过 → 错误仍然是原来那个（根因没变，错误就不该变）
+```
+
+「重新过安全策略」这一关是重点：**校正不是绕过安全检查的后门**。
+校正器返回一条带写操作的 SQL，闭环会把它挡下来；返回一条 UNION，同样挡下来
+（`SQL_FORBIDDEN_CONSTRUCT`）。模型说的不算数，代码说了算。
+
+`SQL_REJECTED` **不可重试**：拿一条被安全策略拒掉的 SQL 去问模型「改一下」，
+等于给注入开了重试的口子。
+
+原始 SQL 一直留着（`detail.original_sql`），校正后的也留着
+（`detail.corrected_sql`），试了几次记在 `detail.attempts`。
+「保留原始 SQL」不是口号，是这三个字段。
+
+### 取消：状态是 cancelled，不是 done
+
+旧系统把取消算成完成：
+
+```tsx
+// 旧系统 fe:src/App.tsx:149
+status: isAbort ? "done" : "error",
+```
+
+用户点了停止，界面显示「已停止本次查询。」，但状态是 `done`——在旧系统的
+眼里，一次被掐断的查询和一次成功返回 20 行的查询**长得一样**。
+
+新系统里取消是**第三个状态**：
+
+- 服务端：`POST /api/cancel` → 编排器在下一个步骤边界停下 → 发一条
+  `CANCELLED` 错误事件；
+- 前端：正在跑的步骤标成「已取消」，**后面的步骤不再开始**；
+- 界面：状态徽章显示「已取消」，**不弹红框**（取消不是失败）。
+
+### 6 类失败在浏览器里
+
+`make stage6-ui` 起一个隔离的临时后端与前端，跑两个无头浏览器用例：
+
+```
+6 类失败 → 6 种互不相同的界面状态（错误码 / 类别 / 失败步骤）
+  SQL_REJECTED       failure  validate_sql  红叉
+  SQL_SYNTAX         failure  validate_sql  红叉
+  SQL_UNKNOWN_COLUMN failure  validate_sql  红叉
+  EMPTY_RESULT       empty    run_sql       绿（不标红）
+  LLM_REFUSAL        failure  generate_sql  红叉
+  TIMEOUT            failure  run_sql       红叉
+取消 → 状态 = 已取消，步骤条停止推进
+```
+
+断言的不是「弹了个红框」，而是**每类失败有它自己的样子**：
+错误码要看得见（不是只在 data 属性里）、失败步骤要对、空结果不许标红、
+取消不许变成完成。
+
+### 场景应用：只换掉两个外部依赖
+
+浏览器测试需要**可复现**的失败——不能指望真模型恰好吐出一条坏 SQL。
+所以有 `app/scenarios/`：一个与生产应用**共用同一套 HTTP / SSE 管道**
+（`app.main.create_app`）的应用，只把编排器的两个外部依赖换成夹具里的替身。
+
+| | 生产 | 场景 |
+|---|---|---|
+| 上下文构建 | 真 | 真 |
+| 提示词渲染 | 真 | 真 |
+| 静态校验（AST） | 真 | 真 |
+| 安全策略（AST） | 真 | 真 |
+| 校正闭环 | 真 | 真 |
+| SSE 序列化 | 真 | 真 |
+| **模型** | 真 / 确定性 | 夹具 |
+| **数据库** | 只读账号 | 夹具 |
+
+所以屏幕上的每一个红叉都对应一次**真实的判定**，而 6 类失败又**可复现**。
+夹具在 `fixtures/failures/scenarios.yaml`，问题写成「场景:<id> <真实问题>」，
+前缀剥掉后交给流水线的仍是**真实问题**——上下文因此是真的。
+
+### S6 的门禁不需要 MySQL，也不需要 LLM
+
+`make stage6` 在一台**没有 Docker、没有数据库、没有 API key** 的机器上就能跑完：
+
+```bash
+make stage6
+
+# 或者逐步看
+cd backend
+uv run python -m app.scripts.failures --check       # 6 类失败各跑一遍
+uv run python -m app.scripts.failures --table       # 错误码表
+uv run python -m app.scripts.failures --scenarios   # 失败场景表
+uv run pytest -q tests/agent                       # 93 条
+```
+
+浏览器验收需要 Chrome / Edge（Windows 上用 Edge 也行）：
+
+```bash
+make stage6-ui
+```
+
+### 命令
+
+```bash
+make stage6        # 离线门禁（不需要 MySQL / LLM / 浏览器）
+make stage6-ui     # 浏览器验收：6 类失败 + 取消（需要 Chrome/Edge）
+```
+
+### 本次测试
+
+- S6：93 条（错误码表 / 严格性 / 校正闭环 / 编排 / 事件 / API / 场景 / 对齐）
+- 前端：23 条协议单测 + 2 个无头浏览器用例
+- 合计：**462 条**（462 通过 / 30 跳过）；`make stage6` 会跑全量后端测试。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -665,6 +849,8 @@ make stage3           # S3：S2 对账 + 20 题黄金集 + CLI YAML + 全部后�
 make stage4           # S4：10 题基线 + 生成层测试 + 全部后端测试（不需要 MySQL/Docker）
 make stage5           # S5：注入语料 100% 拒绝 + 零误杀 + 全部后端测试（不需要 MySQL）
 make stage5-live      # S5 实战：开通只读账号 + 验证它写不了 + 两屏对比（需要 MySQL）
+make stage6           # S6：错误码表 + 6 类失败 + 校正闭环 + 取消（不需要 MySQL/LLM）
+make stage6-ui        # S6 浏览器验收：6 类失败各一个用例 + 取消（需要 Chrome/Edge）
 make baseline         # 只看 S4 的基线表格：问题 / SQL / 判定
 ```
 
@@ -678,6 +864,10 @@ make baseline         # 只看 S4 的基线表格：问题 / SQL / 判定
 > `make stage5` 同样**不需要**数据库：安全策略只依赖契约与 sqlglot。
 > `make stage5-live` 才需要 MySQL，并且需要环境变量 `REBUILD_DW_RO_PASSWORD`
 > （只读账号的密码不在仓库里）。
+>
+> `make stage6` **不需要** MySQL，也不需要 LLM：6 类失败由
+> `fixtures/failures/scenarios.yaml` 驱动，只替换模型与数据库两个外部依赖，
+> 校验、策略、校正、事件全是真代码。`make stage6-ui` 需要 Chrome / Edge。
 
 > **Windows**：控制台默认代码页是 GBK，中文与 `↔` 之类符号会触发
 > `UnicodeEncodeError`，导致 `make stage1` 直接崩。CLI 内部已经把 stdout/stderr
@@ -696,11 +886,13 @@ rebuild/
 │   ├── schema.contract.yaml # S1：5 表 / 24 列 / 6 指标的语义契约
 │   ├── sql.output.schema.json # S4：sql_or_refusal + 拒答码表
 │   ├── sql.policy.yaml     # S5：安全策略（行数上限/超时/禁词/只读账号/错误码）
+│   ├── errors.yaml        # S6：错误码表 + 校正策略（16 个码 / 3 种类别）
 │   └── prompts/            # S4：7 个提示词（frontmatter 声明槽位 + 输出 schema）
 ├── fixtures/               # S1 冻结数据与负向夹具（不依赖旧项目）
 │   ├── dw.sql              # 物理 DDL + 115 单真实数据
 │   ├── legacy/             # 旧 meta_config.yaml + 功能清单（必须红）
-│   └── injection/          # S5：36 条必须拒绝 + 11 条必须放行的注入语料
+│   ├── injection/          # S5：36 条必须拒绝 + 11 条必须放行的注入语料
+│   └── failures/           # S6：6 类失败 + 正常路径 + 校正闭环的场景夹具
 ├── docs/
 │   ├── SCHEMA-CONTRACT.md  # 由契约自动生成（--write-doc）
 │   └── screenshots/
@@ -714,20 +906,27 @@ rebuild/
 │   ├── app/recall/         # S3 关键词/批量召回/合并过滤/YAML
 │   ├── app/generate/       # S4 上下文/提示词/生成器/静态校验/编排
 │   ├── app/security/       # S5 策略/执行器/只读账号/注入语料/Demo
+│   ├── app/agent/          # S6 错误码表/校验关卡/校正闭环/编排器/取消
+│   ├── app/scenarios/      # S6 场景应用（只替换模型与数据库）
 │   ├── app/scripts/recall.py # S3 CLI（stdout YAML + stderr 统计）
 │   ├── app/scripts/generate.py # S4 CLI（YAML / --baseline 表格）
 │   ├── app/scripts/security.py # S5 CLI（--check / --corpus / --policy / --demo）
-│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 + S4 113 + S5 173 = 399 条
+│   ├── app/scripts/failures.py # S6 CLI（--check / --table / --scenarios）
+│   └── tests/              # S0 19 + S1 40 + S2 16 + S3 38 + S4 113 + S5 173 + S6 93 = 462 条
 │       ├── recall/         # 20 题黄金集 + 关键词/渲染/往返测试
 │       ├── generate/       # 10 题基线 + 提示词/静态校验/三方对齐测试
-│       └── security/       # 词法/策略/语料/零误杀/执行器/账号/对齐/Demo
+│       ├── security/       # 词法/策略/语料/零误杀/执行器/账号/对齐/Demo
+│       └── agent/          # 错误码表/校正闭环/编排/取消/API/场景/对齐
 ├── frontend/
 │   ├── src/App.tsx
 │   ├── src/lib/api.ts                # 运行时类型守卫 + SSE 解析器
 │   ├── src/lib/sse.test.ts           # Vitest 协议单测（18 条）
-│   ├── src/components/StepRail.tsx   # 竖向导轨（响应式）
-│   └── tests/s0_smoke.mjs            # 无头 Chrome 冒烟
+│   ├── src/components/StepRail.tsx   # 竖向导轨（响应式，含「已取消」态）
+│   ├── src/components/ErrorCard.tsx  # 失败卡片（红框/空态/取消 + 可复制）
+│   ├── tests/s0_smoke.mjs            # 无头 Chrome 冒烟（正常路径）
+│   └── tests/s6_failures.mjs         # 无头 Chrome：6 类失败 + 取消
 ├── scripts/stage0-ui.sh    # 自起临时端口跑冒烟，跑完清理
+├── scripts/stage6-ui.sh    # 自起场景应用 + 前端，跑 6 类失败的浏览器验收
 └── Makefile
 ```
 
