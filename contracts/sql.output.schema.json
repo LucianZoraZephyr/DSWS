@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dsws.local/contracts/sql.output.schema.json",
+  "title": "S4 · SQL 生成输出契约",
+  "description": "S4 生成的每一步输出都必须落在这些形状之一。generate_sql / correct_sql 只允许 sql_or_refusal——不允许第三种形状，因此「模型把错误信息写成一行数据」在契约层就不可能发生（审计根因 B）。",
+  "$defs": {
+    "sql": {
+      "type": "object",
+      "required": [
+        "sql"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sql": {
+          "type": "string",
+          "minLength": 1,
+          "description": "单条、只读、可被 sqlglot 解析的 SELECT 语句。"
+        }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "required": [
+        "refusal"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "refusal": {
+          "type": "object",
+          "required": [
+            "code",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "description": "机器可判定的拒答码，见 contracts/sql.output.schema.json#/$defs/refusal_codes。"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "人类可读的原因，必须说明缺什么或越了什么界。"
+            }
+          }
+        }
+      }
+    },
+    "sql_or_refusal": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sql"
+        },
+        {
+          "$ref": "#/$defs/refusal"
+        }
+      ]
+    },
+    "keywords": {
+      "type": "array",
+      "description": "旧系统三个 extend_keywords 提示词的真实输出形状：纯字符串数组。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "table_filter": {
+      "type": "object",
+      "description": "旧系统 filter_table_info 的真实输出形状：表名 -> 字段名数组。",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "metric_filter": {
+      "type": "array",
+      "description": "旧系统 filter_metric_info 的真实输出形状：指标名数组。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "refusal_codes": {
+      "type": "array",
+      "description": "S4 允许出现的拒答码全集；代码层与提示词共用这一张表。生成器主动拒答用前 5 个，静态校验判定违规用后 9 个。",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "meaning"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "OUT_OF_RANGE",
+              "UNSUPPORTED_INTENT",
+              "UNKNOWN_COLUMN",
+              "UNKNOWN_TABLE",
+              "INSUFFICIENT_CONTEXT",
+              "SQL_MULTIPLE_STATEMENTS",
+              "SQL_NOT_READ_ONLY",
+              "SQL_UNKNOWN_TABLE",
+              "SQL_UNKNOWN_COLUMN",
+              "SQL_CONSTANT_PROJECTION",
+              "SQL_MISSING_ORDER_BY",
+              "SQL_MISSING_LIMIT",
+              "SQL_SYNTAX",
+              "SQL_EMPTY",
+              "INVALID_OUTPUT"
+            ]
+          },
+          "meaning": {
+            "type": "string"
+          }
+        }
+      },
+      "default": [
+        {
+          "code": "OUT_OF_RANGE",
+          "meaning": "问题超出数据覆盖的时间范围或数据集边界"
+        },
+        {
+          "code": "UNSUPPORTED_INTENT",
+          "meaning": "问题需要的指标、字段或粒度在契约中不存在"
+        },
+        {
+          "code": "UNKNOWN_COLUMN",
+          "meaning": "问题引用了上下文中不存在的字段"
+        },
+        {
+          "code": "UNKNOWN_TABLE",
+          "meaning": "问题引用了上下文中不存在的表"
+        },
+        {
+          "code": "INSUFFICIENT_CONTEXT",
+          "meaning": "上下文不足以判断该问什么"
+        },
+        {
+          "code": "SQL_MULTIPLE_STATEMENTS",
+          "meaning": "不是单条语句"
+        },
+        {
+          "code": "SQL_NOT_READ_ONLY",
+          "meaning": "不是只读查询"
+        },
+        {
+          "code": "SQL_UNKNOWN_TABLE",
+          "meaning": "静态校验：引用了上下文之外的表"
+        },
+        {
+          "code": "SQL_UNKNOWN_COLUMN",
+          "meaning": "静态校验：引用了上下文之外的字段"
+        },
+        {
+          "code": "SQL_CONSTANT_PROJECTION",
+          "meaning": "静态校验：SELECT 列表里投影了常量或 NULL"
+        },
+        {
+          "code": "SQL_MISSING_ORDER_BY",
+          "meaning": "静态校验：排名意图缺 ORDER BY"
+        },
+        {
+          "code": "SQL_MISSING_LIMIT",
+          "meaning": "静态校验：排名意图缺 LIMIT"
+        },
+        {
+          "code": "SQL_SYNTAX",
+          "meaning": "静态校验：SQL 无法被解析"
+        },
+        {
+          "code": "SQL_EMPTY",
+          "meaning": "静态校验：SQL 为空"
+        },
+        {
+          "code": "INVALID_OUTPUT",
+          "meaning": "生成器返回的产物不符合 sql_or_refusal 契约"
+        }
+      ]
+    },
+    "refusal_code_list": {
+      "type": "array",
+      "description": "拒答码的纯列表形式，方便代码与提示词逐字对齐。",
+      "items": {
+        "type": "string",
+        "enum": [
+          "OUT_OF_RANGE",
+          "UNSUPPORTED_INTENT",
+          "UNKNOWN_COLUMN",
+          "UNKNOWN_TABLE",
+          "INSUFFICIENT_CONTEXT",
+          "SQL_MULTIPLE_STATEMENTS",
+          "SQL_NOT_READ_ONLY",
+          "SQL_UNKNOWN_TABLE",
+          "SQL_UNKNOWN_COLUMN",
+          "SQL_CONSTANT_PROJECTION",
+          "SQL_MISSING_ORDER_BY",
+          "SQL_MISSING_LIMIT",
+          "SQL_SYNTAX",
+          "SQL_EMPTY",
+          "INVALID_OUTPUT"
+        ]
+      }
+    },
+    "refusal_code_catalog": {
+      "type": "array",
+      "description": "拒答码 → 含义的对照表。",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "meaning"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "meaning": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$ref": "#/$defs/sql_or_refusal"
+}

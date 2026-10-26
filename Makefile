@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 baseline
 
 install:
 	cd backend && uv sync --frozen
@@ -62,3 +62,19 @@ stage3:
 	@echo "== S3 · 全部后端测试（S0 + S1 + S2 + S3） =="
 	cd backend && uv run pytest -q
 	@echo "S3 PASS"
+
+# S4 硬验收：10 题基线（确定性生成 + 静态校验）→ 生成层测试 → 全量回归
+# 前置：**不需要** MySQL/ES/Qdrant。S4 只到「生成 + 静态校验」，不执行 SQL；
+# 上下文由契约离线裁剪，基线因此可以在任何一台机器上复现。
+stage4:
+	@echo "== S4 · 10 题基线（问题 / SQL / 判定） =="
+	cd backend && uv run python -m app.scripts.generate --baseline
+	@echo "== S4 · 生成层测试（提示词契约 / 静态校验 / 基线 / 三方对齐） =="
+	cd backend && uv run pytest -q tests/generate
+	@echo "== S4 · 全部后端测试（S0 + S1 + S2 + S3 + S4） =="
+	cd backend && uv run pytest -q
+	@echo "S4 PASS"
+
+# 单独看基线表格（路线图里的 Demo：问题 / SQL / 判定）
+baseline:
+	cd backend && uv run python -m app.scripts.generate --baseline

@@ -1,0 +1,126 @@
+# S4 基线：10 个真实问题，覆盖三条硬规则与两种拒答。
+#
+# 题目来源：8 题取自 S3 黄金集（backend/tests/recall/golden.yaml）——同一批
+# 问题在检索层和生成层都能问，跨阶段的语义一致性才有意义；另外 2 题是
+# 针对性的越界题，对应旧系统「空结果 / error_message 行 / 全 NULL」那三道
+# 坏题里最要命的一种：越界时必须显式拒答，而不是伪装成功。
+#
+# expect: sql      → 必须生成一条能通过静态校验的 SQL
+# expect: refusal  → 必须给出拒答，且拒答码要精确匹配
+#
+# sql_contains / sql_not_contains 是**语义断言**，不是字符串快照：
+# 它们断言的是「用了哪些表、哪些字段、有没有排名」这些可机器判定的性质。
+version: 1
+
+questions:
+  # --- 1. 单指标 + 维度过滤 ---------------------------------------------
+  - id: b01
+    golden_id: q01
+    question: "华北销售额"
+    expect: sql
+    sql_contains:
+      - "SUM(fact_order.order_amount)"
+      - "dim_region.region_name"
+      - "'华北'"
+      - "BETWEEN 20250101 AND 20250331"
+    sql_not_contains:
+      - "dim_region.province"
+      - "COUNT(DISTINCT"
+
+  # --- 2. 比率型指标（非可加），口径必须来自契约公式 --------------------
+  - id: b02
+    golden_id: q06
+    question: "平均客单价"
+    expect: sql
+    sql_contains:
+      - "SUM(fact_order.order_amount) / COUNT(DISTINCT fact_order.order_id)"
+      - "AS "
+    sql_not_contains:
+      - "SUM(fact_order.order_quantity)"
+      - "GROUP BY"
+
+  # --- 3. 分组聚合 ------------------------------------------------------
+  - id: b03
+    golden_id: q09
+    question: "各品类销量"
+    expect: sql
+    sql_contains:
+      - "dim_product.category"
+      - "SUM(fact_order.order_quantity)"
+      - "GROUP BY dim_product.category"
+      - "ORDER BY"
+    sql_not_contains:
+      - "dim_region"
+
+  # --- 4. 排名 + LIMIT（硬规则一）---------------------------------------
+  - id: b04
+    golden_id: q10
+    question: "品牌销售额 Top 3"
+    expect: sql
+    sql_contains:
+      - "dim_product.brand"
+      - "ORDER BY"
+      - "LIMIT 3"
+    sql_not_contains:
+      - "dim_region"
+
+  # --- 5. 维度过滤 + 计数指标 -------------------------------------------
+  - id: b05
+    golden_id: q12
+    question: "黄金会员订单量"
+    expect: sql
+    sql_contains:
+      - "COUNT(DISTINCT fact_order.order_id)"
+      - "dim_customer.member_level"
+      - "'黄金'"
+    sql_not_contains:
+      - "dim_customer.gender"
+      - "SUM("
+
+  # --- 6. 排名（最高 → LIMIT 1）------------------------------------------
+  - id: b06
+    golden_id: q17
+    question: "哪个省销量最高"
+    expect: sql
+    sql_contains:
+      - "dim_region.province"
+      - "SUM(fact_order.order_quantity)"
+      - "ORDER BY"
+      - "LIMIT 1"
+    sql_not_contains:
+      - "dim_region.region_name"
+
+  # --- 7. 分组 + 比率型指标 ---------------------------------------------
+  - id: b07
+    golden_id: q16
+    question: "各省平均订单金额"
+    expect: sql
+    sql_contains:
+      - "dim_region.province"
+      - "SUM(fact_order.order_amount) / COUNT(DISTINCT fact_order.order_id)"
+      - "GROUP BY dim_region.province"
+    sql_not_contains:
+      - "dim_region.region_name"
+
+  # --- 8. 时间范围过滤（数据集边界）-------------------------------------
+  - id: b08
+    golden_id: q04
+    question: "2025 年 1 月销量"
+    expect: sql
+    sql_contains:
+      - "SUM(fact_order.order_quantity)"
+      - "BETWEEN 20250101 AND 20250131"
+    sql_not_contains:
+      - "dim_date.month"
+
+  # --- 9. 越界 → 显式拒答（硬规则二）------------------------------------
+  - id: b09
+    question: "2024 年销售额"
+    expect: refusal
+    refusal_code: OUT_OF_RANGE
+
+  # --- 10. 契约不存在的粒度 → 显式拒答 -----------------------------------
+  - id: b10
+    question: "各城市销售额"
+    expect: refusal
+    refusal_code: UNSUPPORTED_INTENT
