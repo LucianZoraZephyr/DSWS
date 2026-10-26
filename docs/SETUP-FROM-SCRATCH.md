@@ -1,8 +1,8 @@
-# 从零搭建 rebuild（S0–S6 已验证版）
+# 从零搭建 rebuild（S0–S7 已验证版）
 
-> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL、S5 安全边界、S6 失败通道**。
-> **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；S4 / S5 与本手册位于 `main`。
-> **不包含**：S7 前端收口、S8 性能。
+> **适用范围**：这份手册只覆盖当前已经实现的 **S0 骨架、S1 Schema 契约、S2 元知识构建、S3 检索、S4 生成 SQL、S5 安全边界、S6 失败通道、S7 前端收口**。
+> **代码快照**：`tag s3` 指向 S3 核心实现提交 `93f61c9`（2026-10-25）；S4–S7 与本手册位于 `main`。
+> **不包含**：S8 性能。
 >
 > 这份手册刻意把三件事分开写：
 >
@@ -44,9 +44,13 @@ make stage5
 
 # 8) S6：失败通道（不需要三存储，也不需要 LLM）
 make stage6
+
+# 9) S7：前端收口（不需要三存储、LLM、浏览器）
+make stage7
 ```
 
-如果上面的命令全部打印 `PASS`，说明 S0–S6 的代码级验收通过。
+如果上面的命令全部打印 `PASS`，说明 S0–S7 的代码级验收通过。
+浏览器部分单独跑：`make stage0-ui` / `make stage6-ui` / `make stage7-ui`（需要 Chrome / Edge）。
 
 > S4 单独拿出来也能跑：它只到「生成 + 静态校验」，上下文由契约离线裁剪，
 > **不需要 MySQL / ES / Qdrant，也不需要 API key 或网络**。
@@ -57,11 +61,15 @@ make stage6
 > S6 的门禁**既不需要数据库也不需要 LLM**：6 类失败由
 > `fixtures/failures/scenarios.yaml` 驱动，只替换模型与数据库两个外部依赖，
 > 校验、策略、校正、事件全是真代码。浏览器验收 `make stage6-ui` 需要 Chrome / Edge。
+>
+> S7 的门禁同样**不需要数据库、LLM 或浏览器**：它校验生成物新鲜度、重录并比对
+> SSE 夹具，再跑前端协议单测与构建。浏览器验收 `make stage7-ui` 用夹具回放代替
+> 真后端，需要 Chrome / Edge。
 
 > ⚠️ 但“S3 通过”不等于“前端已经能真实问数”。`/api/query` 从 S6 起跑的是**真的**
 > 流水线（上下文 → 生成 → 校验 → 校正 → 执行），但真实召回（S3）与真实数据库
 > 还没接上去——没有 MySQL 时它会以一条诚实的 `INTERNAL_ERROR` 收尾，而不是编一份假数据。
-> 详见第 2.10 节与第 7 节。
+> 详见第 2.11 节与第 7 节。
 
 ---
 
@@ -73,13 +81,13 @@ make stage6
 
 | 软件 | 本机版本 | 说明 |
 |---|---|---|
-| Python | 3.14.8（uv venv） | `backend/pyproject.toml` 要求 `>=3.12`；系统 `python3` 为 3.12.3 |
-| uv | 0.13.1 | 用来安装/运行后端 |
+| Python | 3.14.7（uv venv） | `backend/pyproject.toml` 要求 `>=3.12` |
+| uv | 0.12.17 | 用来安装/运行后端 |
 | Node.js | 24.21.0 | 前端 Vite 6 + React 19；建议用当前 LTS |
 | npm | 11.19.0 | 与 Node 一起安装 |
-| Docker Engine | 29.1.3 | 三存储用 |
-| Docker Compose | 2.40.3 | 使用 `docker compose`（v2） |
-| Chrome | 已安装 | 只有可选的 `make stage0-ui` 需要 |
+| Docker Engine | 29.8.0 | 三存储用 |
+| Docker Compose | 5.5.1 | 使用 `docker compose`（v2） |
+| Chrome / Edge | 本机只有 Edge | `make stageN-ui` 需要；`playwright-core` 不自带浏览器，Edge 也行 |
 | GNU Make | 4.4.1（Windows 便携版）/ 4.x（Linux） | 所有 `make stageN` 验收命令都靠它 |
 
 > ℹ️ 这些是“本机验证版本”，不是严格的最低版本。Python 最低按 `pyproject.toml` 是 3.12；Node 建议不要用过老的版本。
@@ -120,6 +128,8 @@ A020-电商问数智能体实战教程fixed/
 | `8100` | rebuild 后端 | `make dev-backend` |
 | `5273` | rebuild 前端 | `make dev-frontend` |
 | `8101` / `5274` | 可选 UI 冒烟临时端口 | `make stage0-ui` |
+| `8102` / `5275` | S6 浏览器验收临时端口 | `make stage6-ui` |
+| `8103` / `5276` | S7 浏览器验收临时端口（回放服务器 / 前端） | `make stage7-ui` |
 | `8000` / `5173` | 旧系统 API / Web | **不要为了 S0–S3 启动** |
 | `5601` | Kibana | 不需要 |
 | `8081` | 旧 embedding 容器 | **不需要**，S2/S3 默认用哈希向量 |
@@ -569,7 +579,7 @@ make stage6
 2. **错误码表**：`python -m app.scripts.failures --table`——
    16 个码，带名称 / 类别 / 可否重试。
 3. **失败场景表**：`python -m app.scripts.failures --scenarios`。
-4. **失败层测试**：`pytest -q tests/agent`（93 条）+ 前端协议单测 + 构建。
+4. **失败层测试**：`pytest -q tests/agent`（107 条：S6 93 + S7 类型保真 14）+ 前端协议单测 + 构建。
 5. **全量后端测试**。
 
 单看一类失败：
@@ -612,7 +622,78 @@ make stage6-ui
 校正器返回一条带写操作的 SQL、或一条 UNION，闭环都必须挡下来
 （`tests/agent/test_orchestrator.py` 里有对应的负例）。
 
-### 2.10 启动开发服务（可选）
+### 2.10 S7：前端收口（不需要三存储，也不需要 LLM / 浏览器）
+
+```bash
+cd "<你的目录>/A020-电商问数智能体实战教程fixed/code/rebuild"
+make stage7
+```
+
+`make stage7` 做五件事：
+
+1. **契约生成物新鲜度**：`python -m app.scripts.contracts_gen --check`——
+   `frontend/src/generated/` 三个文件必须与 `contracts/sse.schema.json` 一致。
+   手改生成物会立刻变红。
+2. **SSE 夹具对账**：`python -m app.scripts.record_sse --check`——
+   重新跑一遍场景应用，把后端吐出的字节流与 `fixtures/sse/*.json` 逐字比对。
+   只归一化 `duration_ms` 与 `request_id` 两处。
+3. **前端契约测试**：`pytest -q tests/frontend`（45 条：生成器 / 夹具 / 类型保真）。
+4. **前端协议单测 + 构建**：`npm run test`（40 条）+ `npm run build`
+   （即 `tsc --noEmit` 零错误 + Vite 构建）。
+5. **全量后端测试**：S0–S7 共 521 passed / 30 skipped。
+
+生成物**不要手改**。改了契约就重新生成：
+
+```bash
+cd backend
+uv run python -m app.scripts.contracts_gen          # 生成
+uv run python -m app.scripts.contracts_gen --check  # 只检查
+```
+
+浏览器验收（需要 Chrome / Edge，Windows 上用 Edge 也行）：
+
+```bash
+make stage7-ui
+```
+
+它自起隔离的**回放服务器**（默认 8103）与前端（5276），用
+`frontend/tests/s7_frontend.mjs` 跑 14 条断言，覆盖 F1–F13（F11 拆成
+5xx / 422 两例），跑完只按自己记下的 pid 清理。端口冲突时：
+
+```bash
+API_PORT=8203 WEB_PORT=5376 make stage7-ui
+```
+
+#### 为什么是回放，不是真后端
+
+有些界面行为真系统**产生不了**：旧系统的伪 SQL 行、契约之外的事件、
+`data:[]` 空数组。但界面仍然必须处理对。
+
+`fixtures/sse/` 共 14 条夹具：10 条从场景应用的真实 SSE 字节流**录制**，
+4 条**手写**（`pseudo_row` / `unknown_event` / `empty_rows` / `null_column`）。
+录制走的是 `app.main.create_app` 的同一条 HTTP/SSE 管道，模型与数据库是夹具里的
+替身，其余全是真代码；只归一化了 `duration_ms` 与 `detail.request_id`。
+
+回放服务器（`frontend/tests/replay-server.mjs`）按生产协议提供
+`/api/health`、`/api/steps`、`/api/errors`、`/api/query`、`/api/cancel`。
+问题写成「场景:<夹具 id> <真实问题>」；`场景:http_500` / `场景:http_422`
+直接返回对应 HTTP 状态，用来验收 F11。
+
+#### 类型保真：Decimal 不再是字符串
+
+`backend/app/agent/values.py` 在 `json.dumps` 之前归一化单元格：
+
+| 数据库类型 | 归一化后 | JSON |
+|---|---|---|
+| `DECIMAL` 整数 | `int` | `10`（不是 `"10"`，也不是 `10.0`） |
+| `DECIMAL` 小数 | `float` | `10.5` |
+| `DATE` / `DATETIME` | ISO 8601 | `"2025-03-01"`，列类型仍是 `date` |
+| 未知类型 | 抛 `TypeError` | 变成 `INTERNAL_ERROR`（诚实的失败） |
+
+`_sse()` 刻意**不传** `default=str`：把 Decimal 静悄悄降级成字符串，正是
+审计 B4 那个缺陷本身。
+
+### 2.11 启动开发服务（可选）
 
 想看步骤条依次点亮、失败各有各的样子时才需要。
 
@@ -634,10 +715,10 @@ make dev-frontend
 
 ```bash
 curl -sS http://127.0.0.1:8100/api/health
-# {"status":"ok","stage":"S6"}
+# {"status":"ok","stage":"S7"}
 
 curl -sS http://127.0.0.1:5273/api/health
-# 通过 Vite 代理，同样返回 stage:S6
+# 通过 Vite 代理，同样返回 stage:S7
 ```
 
 打开 `http://127.0.0.1:5273` 可以看到步骤条依次点亮。**S6 起 `/api/query` 跑的是
@@ -659,7 +740,7 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 剥掉，流水线拿到的仍是真实问题）。
 
 > ✅ 本机已验证：当前 `5273` 返回 200，`8100/api/health` 与 `5273/api/health` 都返回
-> `{"status":"ok","stage":"S6"}`。
+> `{"status":"ok","stage":"S7"}`。
 >
 > ℹ️ Vite 配置了 `host: "0.0.0.0"`，所以局域网可以用
 > `http://<宿主机IP>:5273` 打开；`/api` 由 Vite 在服务器侧代理到
@@ -671,28 +752,32 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 
 | 阶段 | 命令 | 需要三存储 | 核心验收 |
 |---|---|:---:|---|
-| S0 | `make stage0` | 否 | SSE 契约、步骤目录、前端解析/构建；19 后端 + 18 前端 |
+| S0 | `make stage0` | 否 | SSE 契约、步骤目录、前端解析/构建；19 后端 + 40 前端（S7 扩写后） |
 | S1 | `make stage1` | 否 | 5 表/24 列/6 指标契约；旧系统 8 个错误码必须红；40 测试 |
 | S2 | `make stage2` | 是 | 三存储构建、manifest、计数对账、`NOOP: 0 writes`；16 测试 |
 | S3 | `make stage3` | 是 | 4 路批量召回 + merge/filter/context；20 题黄金集；38 测试 |
 | S4 | `make stage4` | 否 | 7 个提示词槽位校验 + sqlglot AST 静态校验 + 10 题基线；113 测试 |
 | S5 | `make stage5` | 否 | AST 级安全策略 + 36 条注入语料 100% 拒绝 + 11 条零误杀；173 测试 |
 | S5 实战 | `make stage5-live` | 是（只要 MySQL） | 只读账号开通 / 验证 + 两屏对比（旧执行 / 新拒绝） |
-| S6 | `make stage6` | 否 | 错误码表 + 6 类失败 + 校正闭环 + 取消；93 测试 |
+| S6 | `make stage6` | 否 | 错误码表 + 6 类失败 + 校正闭环 + 取消；107 测试（含 S7 的 `test_values` 14 条） |
 | S6 浏览器 | `make stage6-ui` | 否（要浏览器） | 6 类失败各一个用例 + 取消，UI 状态互不相同 |
+| S7 | `make stage7` | 否 | 生成物新鲜度 + 14 条 SSE 夹具逐字对账 + 前端契约测试 45 + 前端单测 40 + `tsc`/构建 |
+| S7 浏览器 | `make stage7-ui` | 否（要浏览器） | 13 条 F 缺陷各一条用例（14 条断言，F11 拆 5xx/422），回放夹具 |
 
 当前测试总数：
 
-- 后端：`19 + 40 + 16 + 38 + 113 + 173 + 93 = 492`（其中 30 条按需跳过，
-  实际执行的断言是 462 条）
-- 前端：`23`（协议单测）+ 2 个无头浏览器用例
-- 全量后端默认：`462 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
+- 后端：`19 + 40 + 16 + 38 + 113 + 173 + 107 + 45 = 551`（其中 30 条按需跳过，
+  实际通过 521 条）
+- 前端：`40`（26 协议 + 14 结果表）+ 2 个 S0/S6 无头浏览器用例 + 14 条 S7 断言
+- 全量后端默认：`521 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
   5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过，
   2 条是 S5 里「这一题是拒答，不产生 SQL」的按需跳过）
 - `make stage3` 的 S3 集成：`38 passed`
 - `make stage4` 的生成层：`108 passed, 5 skipped`
 - `make stage5` 的安全层：`171 passed, 2 skipped`
-- `make stage6` 的失败层：`93 passed`
+- `make stage6` 的失败层：`107 passed`（93 S6 + 14 S7 `test_values`）
+- `make stage7` 的前端契约层：`45 passed`；`contracts_gen --check` 与
+  `record_sse --check` 均 PASS（14 条夹具）
 
 ---
 
@@ -824,6 +909,12 @@ uv run python -m app.build_meta_knowledge --dry-run
 | `make stage6-ui` 报「找不到 Chrome/Edge」 | playwright-core 不自带浏览器 | 装 Chrome 或 Edge，或设 `CHROME_PATH=/path/to/chrome` |
 | `make stage6-ui` 报端口被占用 | 8102 / 5275 被别的进程占了 | `API_PORT=8202 WEB_PORT=5375 make stage6-ui` |
 | 页面上问什么都报 `INTERNAL_ERROR` | 没配只读账号，执行阶段连不上库 | 这是**诚实的失败**；配 `REBUILD_DW_RO_PASSWORD` 并跑 `make stage5-live` 开通账号，或用场景应用看 6 类失败 |
+| `make stage7` 报生成物过期 | 手改了 `frontend/src/generated/`，或改了契约没重新生成 | `cd backend && uv run python -m app.scripts.contracts_gen`；生成物**不要手改** |
+| `make stage7` 报 SSE 夹具不一致 | 后端输出变了，但仓库里的夹具没重录 | `cd backend && uv run python -m app.scripts.record_sse`，再人工 review diff；只应出现预期内的变化 |
+| `make stage7-ui` 报「找不到 Chrome/Edge」 | playwright-core 不自带浏览器 | 装 Chrome 或 Edge，或设 `CHROME_PATH=/path/to/chrome` |
+| `make stage7-ui` 报端口被占用 | 8103 / 5276 被别的进程占了 | `API_PORT=8203 WEB_PORT=5376 make stage7-ui` |
+| `make stage7-ui` 报「没有回放夹具」 | query 里的场景 id 不在 `fixtures/sse/` | 用「场景:<夹具 id> <真实问题>」；先 `ls fixtures/sse` 确认 id |
+| Windows 上 `stage7-ui` 结束后端口仍被占用 | 旧式 `kill` 带不走 npm/node 子进程 | 当前脚本会按 `winpid` 用 `taskkill /T /F` 只终止本次进程树；若仍占用，用 `netstat -ano \| findstr :5276` 找**非本次**的进程 |
 
 ---
 
@@ -831,7 +922,7 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ### ✅ 本机已验证（2026-10-26，Windows 11 + Git Bash）
 
-- `make stage0`：19 后端 + 18 前端 + 构建，PASS。
+- `make stage0`：19 后端 + 40 前端 + 构建，PASS。
 - `make stage1`：契约/DDL/数据 + 旧系统 8 个错误码 + 59 条 S0/S1 测试，PASS。
 - `make stage4`：10 题基线 10/10（其中 2 道显式拒答）；生成层 108 passed /
   5 skipped；全量后端 198 passed / 28 skipped；PASS。
@@ -845,16 +936,29 @@ uv run python -m app.build_meta_knowledge --dry-run
   集合运算 / 危险函数 / 白名单外表 / 白名单外列）；执行的 SQL 与被校验的 SQL
   是同一条（去注释 + 自动 LIMIT）。
 - `make stage6`：6 类失败各跑一遍，结局与夹具逐项吻合（错误码 / 类别 / 失败
-  步骤）；错误码表 16 个码，路线图点名的 7 个全在；失败层 93 passed；
-  全量后端 462 passed / 30 skipped；PASS。
+  步骤）；错误码表 16 个码，路线图点名的 7 个全在；失败层 107 passed；
+  全量后端 521 passed / 30 skipped；PASS。
 - `make stage6-ui`（真实浏览器，Edge）：6 类失败给出 **6 种互不相同**的界面状态
   （SQL_REJECTED / SQL_SYNTAX / SQL_UNKNOWN_COLUMN / EMPTY_RESULT /
   LLM_REFUSAL / TIMEOUT），空结果**不**标红，取消后状态是「已取消」且步骤条
   停止推进；同一轮里 S0 的正常路径冒烟也一起通过。
 - S6 的校正闭环：校正后的 SQL **重新过**静态校验与安全策略——校正器返回写操作
   或 UNION 都被挡下（`SQL_REJECTED`），执行器一次都没被调用；校正最多 1 次。
+- `make stage7`：`contracts_gen --check` PASS（3 个生成物与契约一致）；
+  `record_sse --check` PASS（14 条夹具与真实输出逐字一致）；前端契约测试
+  45 passed；前端单测 40 passed；`tsc --noEmit` 零错误；全量后端 521 passed /
+  30 skipped；PASS。
+- `make stage7-ui`（真实浏览器，Edge）：回放服务器 + 隔离前端跑 14 条断言，
+  覆盖 F1–F13（F11 拆 5xx / 422）全部通过；跑完 8103 / 5276 两个端口都释放。
+- S7 的类型保真：`Decimal("10")` → `10`（不是 `"10"`）、`Decimal("10.5")` →
+  `10.5`、`date` 列类型仍是 `date`、布尔不会被当成数字、未知类型抛 `TypeError`；
+  整条 SSE 响应体可以不带 `default` 直接 `json.dumps`。
+- S7 的契约驱动：生成物里 `"failure" | "empty" | "cancelled"` 只定义一次；
+  未知事件类型被忽略而不是报错；错误卡的失败步骤名来自 `/api/steps`。
+- `make stage0` / `stage4` / `stage5` / `stage6` 在 S7 之后重新跑过，仍全绿。
 - 依赖补全：`make`（winget `ezwinports.make` 4.4.1）、`frontend/node_modules`
-  （`npm ci`）、后端新增 `sqlglot`（AST 校验）与 `jsonschema`（输出形状校验）。
+  （`npm ci`）、后端新增 `sqlglot`（AST 校验）与 `jsonschema`（输出形状校验）、
+  浏览器使用系统已装的 Edge（`playwright-core` 不自带浏览器）。
 
 ### ✅ 本机已验证（2026-10-25，Linux）
 
@@ -891,7 +995,7 @@ uv run python -m app.build_meta_knowledge --dry-run
 - S6 的真实 LLM 校正通路（`LlmCorrector` + 真实端点）：接口、提示词与校验都在，
   但没有对着真实端点跑过；默认走的是确定性生成器，校正器在没配 LLM 时**不假装
   能校正**——`correct_sql` 步骤会显式标成「未触发」。
-- S7–S8：不存在。
+- S8：不存在（S7 已于 2026-10-26 在本机验证）。
 
 ### ℹ️ 明确的边界
 
@@ -905,20 +1009,20 @@ uv run python -m app.build_meta_knowledge --dry-run
 
 ## 8. 下一步
 
-当前停点就是 S6。下一步是 **S7：前端收口**——「从契约生成，不从记忆硬编码」：
+当前停点是 S7。下一步是 **S8：性能与真链路收口**（具体交付物以路线图 S8 为准）：
 
-- 前端的 TS 类型从 `contracts/sse.schema.json` 自动生成，并加 diff 检查
-  （现在还是手写版，靠 Vitest 用例 + 后端契约测试共同守住）；
-- 步骤目录、错误码表都从 `/api/steps` / `/api/errors` 拉，前端零硬编码
-  （S6 已经做到「码的含义不硬编码」，但**类型**还是手写的）；
-- 13 个界面缺口按 `audit-frontend-contract.md` 逐条收口；
-- 补齐 `docs/screenshots/` 里的失败态截图（路线图的 Demo 要录 5 种失败态）。
+- 把 S3 的真实召回接进 `/api/query`，替换当前由契约**离线裁剪**的上下文；
+- 把真实 MySQL 与只读账号接到执行路径（`make stage5-live` 端到端跑通）；
+- 对真实 LLM 端点验证生成与校正通路（`HttpLlmGenerator` / `LlmCorrector`）；
+- S8 的性能项：并发、超时、缓存、压测与可观测性；
+- 补齐 `docs/screenshots/` 的失败态截图与路线图 Demo 录屏
+  （正常 / 示例 / 失败三支，与旧版逐帧对比）。
 
-S6 已经把「只读 / 单语句 / 列存在 / 无常量投影 / 排名有 ORDER BY」做成代码级
-守卫（S4），又叠了一层**安全策略**（S5：白名单、只读账号、超时、自动 LIMIT、
-一整套注入语料），最后把它们**接进一条真的链路**（S6：生成 → 校验 → 校正 →
-再校验 → 执行），每一种失败都有名字、有 UI、有测试。
+S7 已经把前端收口做成**可执行的契约**：类型与运行时校验都从
+`contracts/sse.schema.json` 生成/派生，13 条前端缺陷各有浏览器用例，
+SSE 夹具逐字对账，`tsc --noEmit` 零错误。S5 的安全策略与 S6 的失败通道
+也已经接在同一条真流水线上。
 
 > 但仍然不要承诺「前端能真实问数」：`/api/query` 跑的是真流水线，**上下文却是
-> 契约离线裁剪的**，真实召回（S3）与真实数据库还没接上。前端要能问真问题，
-> 还要等 S7 与 S8。
+> 契约离线裁剪的**，真实召回（S3）、真实数据库与真实 LLM 还没接上。
+> 前端要能问真问题，还要等 S8 的真链路收口。
