@@ -1,0 +1,296 @@
+# S5 负向夹具：SQL 注入语料。
+#
+# 这份语料是**反例库**，不是参考实现。每一行都是「旧系统能跑通、新系统必须
+# 拒绝」的载荷。`legacy` 字段记录旧系统**实测**的行为，出处是
+# `packages/A020-电商问数智能体实战教程fixed-clean.zip` 里的
+# `code/shopkeeper-agent/docs/audit-sql-validation.md`（审计缺陷 D6，高·安全）。
+#
+#   legacy: explain_passes        —— 旧系统的 validate() 是 `explain {sql}`，
+#                                    UPDATE / DELETE / INSERT 全部通过校验
+#                                    （MySQL 8.0.18+ 支持 EXPLAIN DML）
+#   legacy: multi_statement_runs  —— 只给第一句加 EXPLAIN 前缀，后面的语句
+#                                    按原样执行；MySQL 对 DDL 自动提交，DROP
+#                                    真执行了
+#   legacy: parser_blind         —— 旧链路对这类载荷没有任何防线
+#
+# `reason_code` 是新系统**必须**给出的原因码。写死它，是为了让「拒绝」
+# 这件事本身可被机器判定——不能只要一个笼统的「被拒了」就算过。
+#
+# allow 段是**零误杀**语料：它们长得像正常查询，必须全部通过。
+version: 1
+
+reject:
+  # --- D6 现象 A：多语句，第二句照常执行 ---------------------------------
+  - id: multi_statement_drop
+    sql: "SELECT 1 AS a FROM fact_order LIMIT 1; DROP TABLE fact_order"
+    legacy: multi_statement_runs
+    evidence: "audit-sql-validation.md §3.6 D6 现象 A（实测：DROP 真执行）"
+    reason_code: SQL_MULTIPLE_STATEMENTS
+
+  - id: multi_statement_update
+    sql: "SELECT 1 FROM fact_order; UPDATE fact_order SET order_amount = 0"
+    legacy: multi_statement_runs
+    evidence: "audit-sql-validation.md §3.6 D6 现象 A"
+    reason_code: SQL_MULTIPLE_STATEMENTS
+
+  - id: comment_then_statement
+    sql: "SELECT 1 FROM fact_order -- \n; DROP TABLE fact_order"
+    legacy: multi_statement_runs
+    evidence: "audit-sql-validation.md §3.6 D6 现象 A（注释行之后的分号照样分句）"
+    reason_code: SQL_MULTIPLE_STATEMENTS
+
+  # --- D6 现象 B：写语句能过 EXPLAIN -------------------------------------
+  - id: update_statement
+    sql: "UPDATE fact_order SET order_amount = 0 WHERE 1 = 0"
+    legacy: explain_passes
+    evidence: "audit-sql-validation.md §3.6 D6 现象 B（实测 EXPLAIN-PASS）"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: delete_statement
+    sql: "DELETE FROM fact_order WHERE 1 = 0"
+    legacy: explain_passes
+    evidence: "audit-sql-validation.md §3.6 D6 现象 B"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: insert_statement
+    sql: "INSERT INTO fact_order (order_id, order_amount) VALUES ('ORD20250101000', 1.0)"
+    legacy: explain_passes
+    evidence: "audit-sql-validation.md §3.6 D6 现象 B"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: drop_table
+    sql: "DROP TABLE fact_order"
+    legacy: explain_passes
+    evidence: "audit-sql-validation.md §3.6 D6 现象 A"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: truncate_table
+    sql: "TRUNCATE TABLE fact_order"
+    legacy: explain_passes
+    evidence: "DDL 不可 EXPLAIN，但旧链路同样没有拦截"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: grant_all
+    sql: "GRANT ALL PRIVILEGES ON dw.* TO 'evil'@'%'"
+    legacy: parser_blind
+    evidence: "旧系统执行账号是 GRANT ALL PRIVILEGES，能给自己发权限"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: set_global
+    sql: "SET GLOBAL max_execution_time = 0"
+    legacy: parser_blind
+    evidence: "会话变量是绕过超时的常规手段"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: alter_table
+    sql: "ALTER TABLE fact_order MODIFY order_amount FLOAT"
+    legacy: parser_blind
+    evidence: "改表结构"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: create_table
+    sql: "CREATE TABLE evil (id INT)"
+    legacy: parser_blind
+    evidence: "建表落库"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: merge_statement
+    sql: "MERGE INTO fact_order USING dim_region ON 1 = 1 WHEN MATCHED THEN UPDATE SET order_amount = 0"
+    legacy: parser_blind
+    evidence: "MERGE 也能改数据"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: revoke_privileges
+    sql: "REVOKE SELECT ON dw.* FROM 'dw_reader'@'%'"
+    legacy: parser_blind
+    evidence: "回收自己的权限"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: call_procedure
+    sql: "CALL some_procedure()"
+    legacy: parser_blind
+    evidence: "存储过程可以做任何事"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: execute_statement
+    sql: "EXECUTE some_procedure()"
+    legacy: parser_blind
+    evidence: "PREPARE/EXECUTE 同样是入口"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: handler_statement
+    sql: "HANDLER fact_order OPEN"
+    legacy: parser_blind
+    evidence: "HANDLER 能直接读写表"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: use_other_database
+    sql: "USE mysql"
+    legacy: parser_blind
+    evidence: "切换到别的库"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: show_tables
+    sql: "SHOW TABLES"
+    legacy: parser_blind
+    evidence: "元数据枚举"
+    reason_code: SQL_NOT_READ_ONLY
+
+  # --- 落盘 / 读文件 -------------------------------------------------------
+  - id: into_outfile
+    sql: "SELECT order_amount FROM fact_order INTO OUTFILE '/tmp/leak.csv'"
+    legacy: parser_blind
+    evidence: "MySQL 方言里这条连 EXPLAIN 都过不了，但显然不是只读查询"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: into_dumpfile
+    sql: "SELECT order_amount FROM fact_order INTO DUMPFILE '/tmp/leak.bin'"
+    legacy: parser_blind
+    evidence: "二进制落盘"
+    reason_code: SQL_NOT_READ_ONLY
+
+  - id: load_file
+    sql: "SELECT LOAD_FILE('/etc/passwd')"
+    legacy: parser_blind
+    evidence: "读服务器磁盘"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  # --- 注释绕过 ------------------------------------------------------------
+  - id: executable_comment_union
+    sql: "SELECT 1 /*!32302 UNION SELECT order_amount FROM fact_order */"
+    legacy: parser_blind
+    evidence: "MySQL 可执行注释：服务端会执行注释里的内容，解析器会忽略它"
+    reason_code: SQL_COMMENT_OBFUSCATION
+
+  - id: executable_comment_drop
+    sql: "SELECT 1 FROM fact_order; /*! DROP TABLE fact_order */"
+    legacy: multi_statement_runs
+    evidence: "可执行注释里藏 DDL"
+    reason_code: SQL_COMMENT_OBFUSCATION
+
+  # --- 外带数据 ------------------------------------------------------------
+  - id: union_exfiltration
+    sql: "SELECT order_amount FROM fact_order UNION SELECT customer_id FROM dim_customer"
+    legacy: parser_blind
+    evidence: "集合运算可以把别的表的数据并进结果"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  - id: union_all_exfiltration
+    sql: "SELECT order_amount FROM fact_order UNION ALL SELECT customer_name FROM dim_customer"
+    legacy: parser_blind
+    evidence: "同 UNION ALL"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  - id: information_schema_tables
+    sql: "SELECT table_name FROM information_schema.tables"
+    legacy: parser_blind
+    evidence: "枚举库里有什么"
+    reason_code: SQL_TABLE_NOT_ALLOWED
+
+  - id: information_schema_columns
+    sql: "SELECT column_name FROM information_schema.columns WHERE table_name = 'fact_order'"
+    legacy: parser_blind
+    evidence: "枚举字段"
+    reason_code: SQL_TABLE_NOT_ALLOWED
+
+  - id: mysql_user_table
+    sql: "SELECT user, authentication_string FROM mysql.user"
+    legacy: parser_blind
+    evidence: "读账号口令散列"
+    reason_code: SQL_TABLE_NOT_ALLOWED
+
+  - id: unknown_table
+    sql: "SELECT secret FROM secret_table"
+    legacy: parser_blind
+    evidence: "契约里根本没有的表"
+    reason_code: SQL_TABLE_NOT_ALLOWED
+
+  - id: unknown_column
+    sql: "SELECT order_amount_secret FROM fact_order"
+    legacy: parser_blind
+    evidence: "契约里根本没有的字段"
+    reason_code: SQL_COLUMN_NOT_ALLOWED
+
+  # --- DoS -----------------------------------------------------------------
+  - id: sleep_dos
+    sql: "SELECT SLEEP(10) FROM fact_order"
+    legacy: parser_blind
+    evidence: "拖垮服务"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  - id: benchmark_dos
+    sql: "SELECT BENCHMARK(10000000, MD5('a')) FROM fact_order"
+    legacy: parser_blind
+    evidence: "占满 CPU"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  - id: get_lock
+    sql: "SELECT GET_LOCK('dw', 10) FROM fact_order"
+    legacy: parser_blind
+    evidence: "锁住业务表"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  - id: error_based_injection
+    sql: "SELECT EXTRACTVALUE(1, CONCAT(0x7e, (SELECT user FROM mysql.user)))"
+    legacy: parser_blind
+    evidence: "报错注入"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+  - id: error_based_injection_updatexml
+    sql: "SELECT UPDATEXML(1, CONCAT(0x7e, 1), 1)"
+    legacy: parser_blind
+    evidence: "报错注入的另一个变体"
+    reason_code: SQL_FORBIDDEN_CONSTRUCT
+
+# --- 零误杀：长得像正常查询，必须全部通过 ---------------------------------
+allow:
+  - id: simple_aggregate
+    sql: "SELECT SUM(fact_order.order_amount) AS gmv FROM fact_order"
+
+  - id: filter_by_enum
+    sql: >-
+      SELECT SUM(fact_order.order_amount) AS gmv FROM fact_order
+      JOIN dim_region ON fact_order.region_id = dim_region.region_id
+      WHERE dim_region.region_name = '华东'
+
+  - id: group_by_with_cn_alias
+    sql: >-
+      SELECT dim_product.category AS 品类, SUM(fact_order.order_quantity) AS 销量
+      FROM fact_order JOIN dim_product ON fact_order.product_id = dim_product.product_id
+      GROUP BY dim_product.category ORDER BY 销量 DESC LIMIT 10
+
+  - id: semicolon_inside_string
+    sql: "SELECT 'a;b' AS x FROM fact_order"
+
+  - id: order_by_alias
+    sql: "SELECT SUM(fact_order.order_amount) AS gmv FROM fact_order ORDER BY gmv DESC"
+
+  - id: count_distinct_subquery
+    sql: >-
+      SELECT COUNT(DISTINCT fact_order.order_id) AS cnt FROM fact_order
+      WHERE fact_order.date_id IN
+      (SELECT dim_date.date_id FROM dim_date WHERE dim_date.quarter = 'Q1')
+
+  - id: select_star
+    sql: "SELECT * FROM fact_order LIMIT 5"
+
+  # 块注释里的分号：服务端不执行它，策略也不该把它当第二条语句。
+  # 这条留在 allow 段，是为了钉住「不被注释吓到」——策略要**解释**这段
+  # 文本，而不是简单地看到分号就拒绝。执行的 SQL 里也不会留下这段注释。
+  - id: semicolon_hidden_by_block_comment
+    sql: "SELECT 1 FROM fact_order /* ; DROP TABLE fact_order */"
+
+  - id: constant_only
+    sql: "SELECT 1"
+
+  - id: like_filter
+    sql: "SELECT dim_product.product_name FROM dim_product WHERE dim_product.product_name LIKE '%手机%'"
+
+  - id: multi_join_group_by
+    sql: >-
+      SELECT dim_customer.member_level AS 会员等级,
+             COUNT(DISTINCT fact_order.order_id) AS 订单数
+      FROM fact_order
+      JOIN dim_customer ON fact_order.customer_id = dim_customer.customer_id
+      GROUP BY dim_customer.member_level
+      ORDER BY 订单数 DESC

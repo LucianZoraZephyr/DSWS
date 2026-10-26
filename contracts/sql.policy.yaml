@@ -1,0 +1,125 @@
+# S5 · SQL 执行策略契约
+#
+# 这份文件是「SQL 能不能执行」的唯一事实源。路线图 S5 的原话是：
+#
+#   > 把"只读"从提示词搬进代码
+#
+# 旧系统把只读寄托在 generate_sql.prompt 的一句「只能查询不能写」上，
+# 于是 `UPDATE` 能过 EXPLAIN、`SELECT 1; DROP TABLE x` 的第二句照常执行
+# （审计 D6，实测）。
+#
+# 这里的规则全部是**代码强制**的：app/security/policy.py 读这份文件，
+# 逐条判定；app/security/executor.py 在连库之前先过这道策略。
+#
+# 白名单（哪些表、哪些列）**不在这里**：它由 contracts/schema.contract.yaml
+# 派生。约束 3 说「schema 单一事实源，禁止手写第二份」——在这里再抄一份
+# 表名清单，就是把同一个漂移再造一遍。
+version: 1
+
+statement:
+  # 只允许**单条** SELECT（WITH ... SELECT 也在内，因为它是 SELECT）。
+  single_statement: true
+
+  # 允许的根节点类型（sqlglot 的表达式类名）。
+  allowed_roots:
+    - Select
+
+  # 集合运算（UNION / UNION ALL / INTERSECT / EXCEPT）一律拒绝。
+  # 理由：问数场景一条查询只需要「一张事实表 + 若干维表」，生成器从不产出
+  # 集合运算；而 UNION 是「外带数据」最常见的载体（把别的表的数据并进结果
+  # 里再骗过只看第一段的校验）。拒掉它比逐个分析 UNION 两侧安全得多。
+  forbid_set_operations: true
+
+  # MySQL 可执行注释 `/*! ... */`：服务端会执行其内容，而解析器会忽略它。
+  # 这不是「风格问题」，是 sqlglot 看不见 DROP 的那个洞。
+  forbid_executable_comments: true
+
+  # 词法层禁词（大小写不敏感，按词边界匹配）。
+  #
+  # 分成两批是因为**原因码不同**：写操作是「不是只读查询」，
+  # 危险函数是「构造本身不允许」——它们在拒答原因里必须说得清楚。
+  #
+  # INTO 也在写操作这一批：`SELECT a INTO OUTFILE '/tmp/x'` 在 MySQL 方言里
+  # 连解析都过不了，但它显然不是只读查询。
+  forbid_write_keywords:
+    - INSERT
+    - UPDATE
+    - DELETE
+    - DROP
+    - ALTER
+    - CREATE
+    - TRUNCATE
+    - MERGE
+    - GRANT
+    - REVOKE
+    - CALL
+    - EXECUTE
+    - HANDLER
+    - INTO
+
+  # 会拖垮服务、读磁盘或做报错注入的（SLEEP / BENCHMARK 是 DoS，
+  # LOAD_FILE 读磁盘，GET_LOCK 锁表，EXTRACTVALUE / UPDATEXML 报错注入）。
+  forbid_dangerous_keywords:
+    - LOAD_FILE
+    - SLEEP
+    - BENCHMARK
+    - GET_LOCK
+    - EXTRACTVALUE
+    - UPDATEXML
+
+limits:
+  # 明细查询默认最多返回多少行：没有 LIMIT 就自动补一个。
+  default_limit: 1000
+  # 超过这个值的 LIMIT 会被截断到这个值。
+  max_limit: 1000
+
+timeout:
+  # MySQL 会话变量 max_execution_time（毫秒），只对 SELECT 生效。
+  max_execution_time_ms: 5000
+  # 客户端 socket 读超时，作为服务端超时的兜底。
+  read_timeout_s: 10
+  # 建连超时。
+  connect_timeout_s: 5
+
+account:
+  # 执行器**只**用这个只读账号连 dw。旧系统的 didilili 账号是
+  # `GRANT ALL PRIVILEGES ON dw.*`（见 fixtures/dw.sql）——新系统不复用它。
+  user: dw_reader
+  host: "%"
+  database: dw
+  # 这个账号在 dw 上只该有的权限。多一项就是配置事故。
+  grants:
+    - SELECT
+
+errors:
+  # 拒答通道码：策略拒绝时对外**只暴露这一个 code**，
+  # 具体原因放在 reason_code 里。
+  #
+  # 为什么要合成一个码：失败只有一种表达方式（审计根因 B）。
+  # 如果策略把「多语句」「写语句」「非白名单表」拆成三个不同的对外码，
+  # 下游就要为每种失败各写一套分支——那正是「失败没有可表达的通道」。
+  channel_code: SQL_REJECTED
+
+  # 执行器层面的错误码全集（策略拒绝之外，数据库自己也会报错）。
+  codes:
+    - SQL_REJECTED
+    - SQL_SYNTAX
+    - SQL_UNKNOWN_TABLE
+    - SQL_UNKNOWN_COLUMN
+    - SQL_EXECUTION_ERROR
+    - TIMEOUT
+
+  # 原因码（细粒度）：SQL_REJECTED 的 reason_code 取值范围。
+  #
+  # 前 4 个与 S4 契约（contracts/sql.output.schema.json）里的同名码含义
+  # 一致——同一件事只能有一个定义，否则两个契约迟早各说各话。
+  # 后 4 个是 S5 独有的。
+  reason_codes:
+    - SQL_EMPTY
+    - SQL_SYNTAX
+    - SQL_MULTIPLE_STATEMENTS
+    - SQL_NOT_READ_ONLY
+    - SQL_TABLE_NOT_ALLOWED
+    - SQL_COLUMN_NOT_ALLOWED
+    - SQL_FORBIDDEN_CONSTRUCT
+    - SQL_COMMENT_OBFUSCATION

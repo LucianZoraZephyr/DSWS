@@ -24,7 +24,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 import sqlglot
@@ -33,6 +32,7 @@ from sqlglot.errors import ParseError
 
 from app.generate.intent import has_ranking_intent, ranking_limit, top_n
 from app.generate.models import GenerateContext, GuardReport, GuardViolation
+from app.sqllex import scan_keywords
 
 # 词法层的写操作标记。
 #
@@ -44,6 +44,9 @@ from app.generate.models import GenerateContext, GuardReport, GuardViolation
 #
 # 用词边界（\b）而不是子串匹配，避免 `created_at`、`last_update` 这类
 # 合法列名被误判。
+#
+# 词法实现在 `app/sqllex.py`——S5 的安全策略用的是同一份。两层如果各写
+# 一份，就可能出现「S4 的词法层放行、S5 的词法层拦截」这种口径漂移。
 _WRITE_KEYWORDS = (
     "INSERT",
     "UPDATE",
@@ -60,13 +63,6 @@ _WRITE_KEYWORDS = (
     "HANDLER",
     "LOAD_FILE",
     "INTO",
-)
-
-_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
-_LITERAL_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`", re.DOTALL)
-_WRITE_RE = re.compile(
-    r"\b(" + "|".join(_WRITE_KEYWORDS) + r")\b",
-    re.IGNORECASE,
 )
 
 # 任何一种出现即判定「不是只读」。
@@ -322,11 +318,4 @@ def _expects_limit(query: str) -> bool:
 
 def lexical_write_markers(sql: str) -> list[str]:
     """词法层扫出来的写操作关键字（已剥离注释、字符串与反引号标识符）。"""
-    text = _COMMENT_RE.sub(" ", str(sql))
-    text = _LITERAL_RE.sub(" ", text)
-    found: list[str] = []
-    for match in _WRITE_RE.finditer(text):
-        keyword = match.group(1).upper()
-        if keyword not in found:
-            found.append(keyword)
-    return found
+    return scan_keywords(str(sql), _WRITE_KEYWORDS)

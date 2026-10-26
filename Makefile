@@ -1,4 +1,4 @@
-.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 baseline
+.PHONY: install dev-backend dev-frontend stage0 stage0-ui stage1 stage2 stage3 stage4 stage5 stage5-live baseline
 
 install:
 	cd backend && uv sync --frozen
@@ -78,3 +78,29 @@ stage4:
 # 单独看基线表格（路线图里的 Demo：问题 / SQL / 判定）
 baseline:
 	cd backend && uv run python -m app.scripts.generate --baseline
+
+# S5 硬验收：AST 级安全策略 + 注入语料 100% 拒绝 + 零误杀
+# 前置：**不需要** MySQL。策略只依赖契约与 sqlglot，因此门禁可以在任何
+# 一台机器上复现。只读账号与两屏对比需要 MySQL，见 stage5-live。
+stage5:
+	@echo "== S5 · 安全策略门禁（注入语料 100% 拒绝 + 零误杀） =="
+	cd backend && uv run python -m app.scripts.security --check
+	@echo "== S5 · 注入语料判定表 =="
+	cd backend && uv run python -m app.scripts.security --corpus
+	@echo "== S5 · 安全层测试（策略 / 语料 / 执行器 / 账号 / 对齐） =="
+	cd backend && uv run pytest -q tests/security
+	@echo "== S5 · 全部后端测试（S0 + S1 + S2 + S3 + S4 + S5） =="
+	cd backend && uv run pytest -q
+	@echo "S5 PASS"
+
+# S5 实战验收：需要 MySQL —— 开通只读账号、验证它真的写不了、两屏对比
+# 前置：MySQL 已启动，dw 库已由 fixtures/dw.sql 装载；
+#      环境变量 REBUILD_DW_RO_PASSWORD 给出只读账号的密码（不在仓库里）。
+stage5-live:
+	@echo "== S5 · 开通只读账号 =="
+	cd backend && uv run python -m app.scripts.security --provision-ro-account
+	@echo "== S5 · 验证只读账号（真的写不了） =="
+	cd backend && uv run python -m app.scripts.security --verify-ro-account
+	@echo "== S5 · 两屏对比：旧系统执行 / 新系统拒绝 =="
+	cd backend && uv run python -m app.scripts.security --demo
+	@echo "S5 LIVE PASS"
