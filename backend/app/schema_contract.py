@@ -38,6 +38,8 @@ from typing import Any, Iterable, Sequence
 
 import yaml
 
+from app.cli import enable_utf8_stdio
+
 REBUILD_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = REBUILD_ROOT / "contracts" / "schema.contract.yaml"
 DDL_PATH = REBUILD_ROOT / "fixtures" / "dw.sql"
@@ -335,11 +337,18 @@ def _scalar(conn: sqlite3.Connection, sql: str) -> Any:
 
 
 def _path_label(path: Path) -> str:
-    """文档里只出现仓库相对路径，避免把本机绝对路径写进生成物。"""
+    """文档里只出现仓库相对路径，避免把本机绝对路径写进生成物。
+
+    统一用 POSIX 风格（正斜杠）：`docs/SCHEMA-CONTRACT.md` 是**提交进仓库**
+    的生成物，必须在任何平台上都能复现出同一份字节。Windows 上
+    `str(path.relative_to(...))` 会产出 `fixtures\\legacy\\feature-list.md`，
+    于是「文档新鲜度」检查在 Windows 上必然失败——而 `--write-doc` 重新生成
+    又会把反斜杠写回去。`as_posix()` 消掉这个平台差异。
+    """
     try:
-        return str(path.relative_to(REBUILD_ROOT))
+        return path.relative_to(REBUILD_ROOT).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _distinct(conn: sqlite3.Connection, table: str, column: str) -> list[Any]:
@@ -1776,6 +1785,7 @@ def _doc_is_fresh(contract: dict[str, Any], ddl: Ddl) -> bool:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    enable_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="python -m app.schema_contract",
         description="S1 Schema 契约检查（DDL ↔ contract ↔ 旧系统负向夹具）",

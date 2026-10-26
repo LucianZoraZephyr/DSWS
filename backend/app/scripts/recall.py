@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from app.recall.errors import RecallError
 from app.recall.pipeline import recall
 from app.recall.render import render
+from app.cli import enable_utf8_stdio
 
 
 def _stats_line(state) -> str:
@@ -43,6 +44,7 @@ def _stats_line(state) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    enable_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="python -m app.scripts.recall",
         description="S3 检索层：输入问题，输出 LLM 上下文 YAML（无 LLM）",

@@ -24,6 +24,7 @@ from app.build.pipeline import (
     verify,
 )
 from app.build.plan import BuildPlan
+from app.cli import enable_utf8_stdio
 
 
 def _print_plan(plan: BuildPlan, config: BuildConfig) -> None:
@@ -84,6 +85,7 @@ def _print_verify(result: VerifyResult, config: BuildConfig) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    enable_utf8_stdio()
     parser = argparse.ArgumentParser(
         description="S2 · 从契约构建元知识（Meta MySQL + ES + Qdrant）"
     )
