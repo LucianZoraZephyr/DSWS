@@ -1,11 +1,13 @@
 # Docker 复查交接文档
 
-> 状态：**代码修复已完成，测试全绿；尚未提交，也未跑完整重建式验收。**
+> 状态：**已完成。** 代码修复已提交（`a51f434`），重建式验收已通过。
 >
 > - 任务：复查刚做完的 Docker 容器化改造，把查出来的问题修掉。
-> - 分支：`fix/docker-containerization-review`（从 `main` 的 `c0a49e1` 拉出，**至今 0 个 commit**）。
-> - 全量后端测试：**782 passed / 31 skipped**（74.68 s，退出码 0）。
-> - 线上 Docker 栈**仍在跑**，五服务 healthy、`init` exited 0、数据卷完好；本轮对它只做过只读核对。
+> - 分支：`fix/docker-containerization-review`（从 `main` 的 `c0a49e1` 拉出，**1 个 commit**）。
+> - 全量后端测试：**782 passed / 31 skipped**（68.43 s，退出码 0）。
+> - 重建式验收：`bash scripts/docker-smoke.sh` → **DOCKER SMOKE PASS**（退出码 0，8 步全过）。
+> - 线上 Docker 栈仍在跑，五服务 healthy、`init` exited 0、数据卷完好；`backend`/`init`
+>   已按当前源码重建，`frontend` 构建命中缓存（本轮没有改前端源码）。
 >
 > 接手的人请先读 §2（仓库状态）和 §8（操作红线）。
 
@@ -45,17 +47,14 @@ Compose 项目名 `shopkeeper-rebuild`；卷：`shopkeeper-rebuild_mysql_data` /
 
 ```
 分支：fix/docker-containerization-review
-HEAD：c0a49e1（== main，容器化本体）
-提交数：0        ← 修复全在工作区，没提交
+HEAD：a51f434（容器化复查修复，共 43 个文件）
+提交数：1        ← 工作区干净
 ```
 
-`git status` 是脏的，而且**脏的是"复查修复"本身**——不是半成品：
+修复分两轮做的（早期一轮编号 M-xx，后期一轮编号 A/B-xx），**两轮改到了同一批文件**，
+按轮次拆提交不现实，因此合并为一个 commit（§7.2）。
 
-- `HEAD` 里已经是完整的容器化；工作区的每一条 diff 都是复查后的修复。
-- 修复分两轮做的（早期一轮编号 M-xx，后期一轮编号 A/B-xx），**两轮改到了同一批文件**，
-  按轮次拆提交不现实。建议按下面的方式提交（§7.2）。
-
-工作区里这些是**新增文件**（`git status` 里是 `??`），提交时别漏：
+该 commit 包含这些**新增文件**：
 
 ```
 backend/tests/recall/test_clients.py
@@ -252,27 +251,27 @@ cd backend && uv run --no-sync python -m pytest -q
 
 ---
 
-## 6. 还没做的两件事
+## 6. 已完成的两件事（2026-10-28）
 
-### 6.1 完整 `make docker-smoke`（会重建容器，需要用户点头）
+### 6.1 完整 `make docker-smoke`
 
 ```bash
 bash scripts/docker-smoke.sh
 ```
 
-**这一步会 `docker compose up -d --build`**，重建并替换当前跑着的容器。本轮没有做，
-有两个原因：
+已在用户确认后执行：**DOCKER SMOKE PASS，退出码 0**，8 步全过。
 
-1. 用户在跑的栈不能被随便重建（红线，见 §8）；
-2. 线上镜像是 **2026-10-27 10:42 UTC** 构建的，**比工作区里的源码改动旧**——
-   §5.2 那些只读核对验的是**旧镜像**。要把当前代码端到端验一遍，重建是必须的。
-
-跑之前请确认：数据卷不会被删（脚本只删卷，smoke 不会碰卷）；`init` 幂等，
-重跑会走 "meta: verify passed; skip rebuild"。
+- `docker compose up -d --build`：`backend` / `init` 按当前源码重建并重启；
+  `frontend` 构建命中缓存（本轮没有改前端源码），容器未重建；
+  `mysql` / `elasticsearch` / `qdrant` 与数据卷保持原样。
+- `nginx -T` 输出完整，`/api/` 的 `proxy_buffering` 已关。
+- `init` 重跑走了 "meta: verify passed; skip rebuild"。
+- 收尾状态：五服务 healthy、`init` exited 0。
 
 ### 6.2 提交
 
-用户**没有**明确要求提交，所以一直压着。§7.2 给了建议的拆法。
+已提交为 `a51f434`（43 个文件，含 §2 列出的全部新增文件与本文档）。
+按用户要求，分支保留在本地，**没有合并、没有推送**。
 
 ---
 
@@ -286,27 +285,19 @@ cd .. && docker compose config --quiet                  # 期望无输出、退�
 bash scripts/find-python.sh                            # 期望打印一个 >= 3.8 的解释器路径
 ```
 
-### 7.2 提交的建议拆法
+### 7.2 提交（已完成）
 
-两轮修复改到了同一批文件，按轮次拆不现实。建议**两个 commit**：
+两轮修复改到了同一批文件，按轮次拆不现实，最终合并为**一个 commit**：
 
-1. **`fix(docker): 容器化复查修复（验收脚本 + 宿主脚本 + 文档）`**
-   —— 一次提交全部改动（含 §2 列出的新增文件），提交信息里带上 §3 的表。
-2. 如果想再拆细，可以按主题拆成三个：
-   - `fix(docker): 验收脚本不得给出假 PASS（A1/A2/A3/A5/A6/A7/A8）`
-   - `fix(docker): 宿主脚本与 Compose 取值一致 + .env 原子写（B1/B2/B3/B4/B5/B6/B7/B9）`
-   - `docs(docker): "已 export 的 shell 值才优先"等表述更正`
+`a51f434` — `fix(docker): 容器化复查修复（验收脚本 + 宿主脚本 + 文档）`
 
-提交前确认：
+已确认：15 个新增文件全部入库；`.env` 未入库（`.gitignore` 覆盖，`.env.example` 才是模板）；
+提交前 §7.1 的三条命令均通过。
 
-- 新增的 15 个文件（§2）都要 `git add`；
-- `.env` 不要入库（`.gitignore` 已覆盖，`.env.example` 才是模板）；
-- 提交前再跑一次 §7.1 的三条命令。
-
-### 7.3 想补做的话：把线上栈重建后跑完整验收
+### 7.3 重建式验收（已完成）
 
 ```bash
-bash scripts/docker-smoke.sh     # 期望最后一行 DOCKER SMOKE PASS，退出码 0
+bash scripts/docker-smoke.sh     # 已执行：DOCKER SMOKE PASS，退出码 0
 ```
 
 ---
