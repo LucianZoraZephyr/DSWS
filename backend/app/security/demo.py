@@ -72,6 +72,21 @@ def _probe_exists(cursor: Any) -> bool:
     return bool(cursor.fetchall())
 
 
+def _drain_resultsets(cursor: Any) -> None:
+    """把一次多语句执行剩下的结果集读完。
+
+    不读干净的话，下一次 ``execute`` 在某些驱动上会撞
+    "Commands out of sync"（pymysql 自己会替我们读干净，但别的驱动不会）。
+
+    读不干净也不该让 demo 崩掉——结论是由探针表判定的。
+    """
+    try:
+        while cursor.nextset():
+            pass
+    except Exception:  # noqa: BLE001 - 读不干净也不影响结论
+        pass
+
+
 def run_demo(connection: Any) -> DemoReport:
     """跑两屏对比。
 
@@ -102,11 +117,21 @@ def run_demo(connection: Any) -> DemoReport:
             legacy_validate = "通过（没有抛出任何异常）"
         except Exception as exc:  # noqa: BLE001 - 这就是要演示的现象
             legacy_validate = f"失败：{exc}"
+        # explain 那次是**多语句**：后面的 DROP 已经跟着执行了，探针表这时
+        # 就已经没了。剩下的结果集要读干净，否则下一次 execute 会撞
+        # "Commands out of sync"。
+        _drain_resultsets(cursor)
 
         # --- 旧系统：run() = 直接执行 -----------------------------------
-        cursor.execute(payload)
-        while cursor.nextset():
+        try:
+            cursor.execute(payload)
+        except Exception:  # noqa: BLE001 - 这不是 demo 自己的错
+            # 探针表在 validate 那一步就已经被 DROP 了，这次 execute 撞的
+            # 正是 "Unknown table"（真 MySQL 报 1051）。那恰恰是"旧系统真的
+            # 执行了第二句"的证据，不是失败——结论由下面的探针表判定，
+            # 不由一个异常决定。
             pass
+        _drain_resultsets(cursor)
         legacy_probe_alive = _probe_exists(cursor)
         legacy_executed = not legacy_probe_alive
 

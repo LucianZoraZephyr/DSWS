@@ -54,6 +54,8 @@ make stage7
 如果上面的命令全部打印 `PASS`，说明 S0–S7 的代码级验收通过。
 浏览器部分单独跑：`make stage0-ui` / `make stage6-ui` / `make stage7-ui`（需要 Chrome / Edge）。
 
+> 不想在本机装 Python / Node，也可以走全量 Docker 部署，见 2.12 节。
+
 > S4 单独拿出来也能跑：它只到「生成 + 静态校验」，上下文由契约离线裁剪，
 > **不需要 MySQL / ES / Qdrant，也不需要 API key 或网络**。
 >
@@ -96,15 +98,17 @@ make stage7
 
 ### 1.2 代码目录
 
-当前 `rebuild/` 是一个**独立 git 仓库**，但**没有配置 remote**：
+当前 `rebuild/` 是一个**独立 git 仓库**，并且**已经配置了 remote**：
 
 ```bash
 cd code/rebuild
 git remote -v
-# 输出为空
+# origin  https://github.com/LucianZoraZephyr/DSWS.git (fetch)
+# origin  https://github.com/LucianZoraZephyr/DSWS.git (push)
 ```
 
-所以不要照抄“`git clone <repo>`”就以为能拿到全部依赖。你需要保证至少有两块：
+所以 `git clone` 能拿到全部内容。但**旧系统 `shopkeeper-agent/` 不在这个仓库里**，
+只靠 clone 仍然缺一块：
 
 ```text
 A020-电商问数智能体实战教程fixed/
@@ -127,7 +131,8 @@ A020-电商问数智能体实战教程fixed/
 | `9200` | Elasticsearch | compose 里的 `elasticsearch` |
 | `6333` | Qdrant REST | compose 里的 `qdrant` |
 | `6334` | Qdrant gRPC | 当前代码不用 |
-| `8100` | rebuild 后端 | `make dev-backend` |
+| `8100` | rebuild 后端 | `make dev-backend`；**容器后端也映射这个端口**，两者不要同时跑 |
+| `8080` | rebuild 前端（Docker 全量部署的对外入口） | `make docker-up`；与 `make dev-frontend` 的 5273 互不冲突 |
 | `5273` | rebuild 前端 | `make dev-frontend` |
 | `8101` / `5274` | 可选 UI 冒烟临时端口 | `make stage0-ui` |
 | `8102` / `5275` | S6 浏览器验收临时端口 | `make stage6-ui` |
@@ -239,6 +244,36 @@ source scripts/export-docker-env.sh
 `make docker-env` 生成的 Compose 密码是随机的，宿主 CLI 不会自动读 `.env`；
 上面的 helper 把它们导出为 `REBUILD_*` 变量（成功时不打印任何内容）。
 
+`.env` 已经存在时 `make docker-env` **不会覆盖**它——生成器默认不覆盖，
+免得把正在用的密码换掉、连不上库。要重新生成或换密码，看
+[`DOCKER-DEPLOY.md`](DOCKER-DEPLOY.md) 第 4 节。
+
+#### `source` 之后，shell 和 Compose 读到的必须是同一个值
+
+`docker compose` 解析 `${VAR}` 的顺序是**先看当前 shell 里已 export 的环境变量，
+再看 `.env` 文件**——没 export 的 shell 变量 Compose 根本看不见。helper 只读
+`.env`，所以两边取法不一致时，容器和宿主 CLI 就会拿到不同的密码——两边都
+"没写错"，宿主 CLI 却只收到一句 `Access denied`。helper 的取值规则：
+
+| 情况 | 取值 | 说明 |
+|---|---|---|
+| `.env` 有值 | `.env` 的值 | `.env` 是这份部署的事实源 |
+| `.env` 有值，shell 里**已 export** 的值不一样 | `.env` 的值 + stderr 告警 | 告警**只报变量名，不报值** |
+| `.env` 有值，shell 里定义了但**没 export** | `.env` 的值 + stderr 告警 | Compose 看不见没 export 的值，告警里会点名这件事 |
+| `.env` 里是空值，shell 里非空 | shell 的值 | 空值不能把用户自己 export 的值抹掉 |
+| 端口（`MYSQL_HOST_PORT` 等） | 已 export 的 shell 值 → `.env` → 默认值 | 和 Compose 的 `${VAR:-default}` 一致 |
+
+helper export 的是 `REBUILD_*`（宿主 CLI 用的那些）。`MYSQL_PASSWORD` /
+`MYSQL_ROOT_PASSWORD` 这两个 Compose 插值用的名字，它**刻意不 export**：
+export 出去的话，shell 里那份快照会一直挡住 `.env` 里的新值——用户轮换了
+密码之后，容器还在用旧密码，宿主 CLI 用的是新密码，两边对不上，症状只有
+一句 `Access denied`。不 export，Compose 下次读 `.env` 时读到的就是新值；
+helper 这边也已经按 Compose 的顺序（已 export 的 shell 值优先、再 `.env`）
+取好了同一个字符串。
+
+> **改了 `.env` 要重新 `source` 一次**：脚本导出的是 `.env` 的一份快照，
+> shell 里那份旧值会挡住 Compose 读到新的 `.env`。
+
 如果 `3306 / 9200 / 6333` 已经有服务在跑，直接探活即可，不要重复 `up`；
 不要用旧系统的 compose。
 
@@ -279,7 +314,8 @@ S2/S3 默认用 `hash-ngram-v1` 哈希向量，不需要 embedding 容器。
 
 仓库根 `compose.yaml` 的数据卷只属于 rebuild。`make docker-down` 保留数据卷；
 `make docker-reset` 会要求输入 `yes`，然后才删除 rebuild 的 MySQL/ES/Qdrant
-数据卷。任何时候都不要在旧系统目录执行 `docker compose down -v`。
+数据卷（容器和网络也一起没了）。任何时候都不要在旧系统目录执行
+`docker compose down -v`。
 
 > ⚠️ **未在本 shell 验证**：当前审计账户没有 Docker socket 权限，`docker ps` 报
 > `permission denied ... /var/run/docker.sock`。上面的 compose 命令对应仓库根的
@@ -645,7 +681,8 @@ make stage7
 3. **前端契约测试**：`pytest -q tests/frontend`（45 条：生成器 / 夹具 / 类型保真）。
 4. **前端协议单测 + 构建**：`npm run test`（40 条）+ `npm run build`
    （即 `tsc --noEmit` 零错误 + Vite 构建）。
-5. **全量后端测试**：527 passed / 30 skipped（S0–S7 + 6 条 Docker init 测试）。
+5. **全量后端测试**：665 passed / 31 skipped（S0–S7 + Docker init 测试
+   + Docker 化复查修复新增）。
 
 生成物**不要手改**。改了契约就重新生成：
 
@@ -751,6 +788,46 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 > `http://<宿主机IP>:5273` 打开；`/api` 由 Vite 在服务器侧代理到
 > `127.0.0.1:8100`。后端本身默认只监听 `127.0.0.1`，不直接暴露到局域网。
 
+### 2.12 全量 Docker 部署（可选）
+
+不想在本机装 Python / Node 时，整套系统可以跑在 Docker 里：前端、后端、
+MySQL、ES、Qdrant，外加一个一次性的 `init`。
+
+```bash
+make docker-env    # 生成 .env（随机密码；已存在则跳过）
+make docker-up     # 构建并启动五服务 + 一次性 init
+curl -fsS http://127.0.0.1:8080/api/health
+make docker-smoke  # 完整验收
+```
+
+`init` 负责开通只读账号、校验 S2 元知识（缺失就先构建），它成功退出后
+backend 才启动，backend 健康后 frontend 才启动。对外入口只有
+`http://127.0.0.1:8080`。
+
+`.env` 已经存在时 `make docker-env` 会跳过（不覆盖）。要重新生成：
+
+```bash
+python scripts/generate_docker_env.py --dry-run        # 预览，密码显示为 ***
+python scripts/generate_docker_env.py --force          # 覆盖，但保留已有密码
+python scripts/generate_docker_env.py --rotate-secrets # 换密码
+```
+
+**换 MySQL 密码必须先 `make docker-reset`**：MySQL 只在**首次**初始化
+`mysql_data` 数据卷时用 `MYSQL_ROOT_PASSWORD` 建账号；卷还在的话，容器里的
+密码仍然是旧的那个，新密码不生效——健康检查会一直失败，`init` 和 `backend`
+于是都起不来。顺序是 `make docker-reset` → `--rotate-secrets` → `make docker-up`。
+
+> ⚠️ 容器后端也占用宿主机 `8100`，和 `make dev-backend` 撞端口——
+> 两者不要同时跑（见 [`DOCKER-DEPLOY.md`](DOCKER-DEPLOY.md) 2.1 节）。
+>
+> ℹ️ 容器里的元知识 CLI 挂在 `init` 服务下跑（只有它持有构建凭据）：
+>
+> ```bash
+> docker compose run --rm --no-deps init python -m app.scripts.recall "华北销售额"
+> ```
+
+端口、镜像源、密钥轮换与排障见 [`DOCKER-DEPLOY.md`](DOCKER-DEPLOY.md)。
+
 ---
 
 ## 3. 每个阶段到底验了什么
@@ -759,7 +836,7 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 |---|---|:---:|---|
 | S0 | `make stage0` | 否 | SSE 契约、步骤目录、前端解析/构建；19 后端 + 40 前端（S7 扩写后） |
 | S1 | `make stage1` | 否 | 5 表/24 列/6 指标契约；旧系统 8 个错误码必须红；40 测试 |
-| S2 | `make stage2` | 是 | 三存储构建、manifest、计数对账、`NOOP: 0 writes`；16 测试 |
+| S2 | `make stage2` | 是 | 三存储构建、manifest、计数对账、`NOOP: 0 writes`；17 测试 |
 | S3 | `make stage3` | 是 | 4 路批量召回 + merge/filter/context；20 题黄金集；38 测试 |
 | S4 | `make stage4` | 否 | 7 个提示词槽位校验 + sqlglot AST 静态校验 + 10 题基线；113 测试 |
 | S5 | `make stage5` | 否 | AST 级安全策略 + 36 条注入语料 100% 拒绝 + 11 条零误杀；173 测试 |
@@ -771,12 +848,20 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 
 当前测试总数：
 
-- 后端：`19 + 40 + 16 + 38 + 113 + 173 + 107 + 45 + 6 = 557`（其中 30 条按需跳过，
-  实际通过 527 条；最后 6 条是 Docker init 测试）
+- 后端：`665 passed / 31 skipped`（共 696 条）。31 条跳过里，23 条是 S3 真实存储
+  集成测试、5 条是 S4 的按需跳过、2 条是 S5 的按需跳过、1 条是 Windows 上
+  不适用的 `.env` 权限位检查。
+- 上一轮（Docker 化收尾，`c0a49e1`）只新增了 6 条：Docker init 初始化脚本
+  （`tests/test_docker_init.py`）。
+- **Docker 化复查修复**这一轮新增 134 条（12 个新测试文件共 133 条 + 既有
+  `tests/test_s2_build.py` 里补的 1 条）：`.env` 导出脚本的更多边界（44）、
+  验收脚本的 SSE 判据（22）、`.env` 生成脚本的 `--force` / `--rotate-secrets` /
+  `--dry-run` 行为（14）、构建凭据的 AST 护栏（11）、`docker-reset` 脚本（10）、
+  Python 解释器探测（9）、元数据库的 root 凭据报错（4）、
+  Makefile 与 UI 脚本的可移植性（7）、换行符（3）、召回演示脚本（3）、召回层缺凭据时的行为（3）、
+  只读账号 CLI（3），以及 `safe_repr()` 不泄露真实口令（1）。
 - 前端：`40`（26 协议 + 14 结果表）+ 2 个 S0/S6 无头浏览器用例 + 14 条 S7 断言
-- 全量后端默认：`527 passed, 30 skipped`（23 条是 S3 真实存储集成测试，
-  5 条是 S4 里「输出形状不是 sql_or_refusal 的提示词」的按需跳过，
-  2 条是 S5 里「这一题是拒答，不产生 SQL」的按需跳过）
+- 全量后端默认：`665 passed, 31 skipped`
 - `make stage3` 的 S3 集成：`38 passed`
 - `make stage4` 的生成层：`108 passed, 5 skipped`
 - `make stage5` 的安全层：`171 passed, 2 skipped`
@@ -795,9 +880,9 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 | `REBUILD_MYSQL_HOST` | `127.0.0.1` | MySQL 主机 |
 | `REBUILD_MYSQL_PORT` | `3306` | MySQL 端口 |
 | `REBUILD_MYSQL_USER` | `didilili` | 普通用户 |
-| `REBUILD_MYSQL_PASSWORD` | `dili123` | 普通用户密码 |
+| `REBUILD_MYSQL_PASSWORD` | **无默认** | 普通用户密码——**必须由部署环境提供** |
 | `REBUILD_MYSQL_ROOT_USER` | `root` | 建库/授权用 |
-| `REBUILD_MYSQL_ROOT_PASSWORD` | `dili123` | root 密码 |
+| `REBUILD_MYSQL_ROOT_PASSWORD` | **无默认** | root 密码——同上 |
 | `REBUILD_META_DB` | `meta_rebuild` | Meta 库名 |
 | `REBUILD_ES_URL` | `http://127.0.0.1:9200` | ES 地址 |
 | `REBUILD_ES_INDEX` | `value_index_rebuild` | ES 索引名 |
@@ -821,6 +906,14 @@ cd frontend && VITE_DEV_PROXY_TARGET=http://127.0.0.1:8102 npm run dev
 > `REBUILD_DW_RO_PASSWORD` 没有默认值是**故意的**：只读账号的密码属于秘密，
 > 不进仓库、不进契约、不进任何生成物。缺它时 `make stage5-live` 会**直接报错**，
 > 不会悄悄连成别的账号。
+>
+> `REBUILD_MYSQL_PASSWORD` / `REBUILD_MYSQL_ROOT_PASSWORD` 同样**没有默认值**：
+> 早期版本内置过一个写死的 MySQL 兜底口令，那是把一个真实口令写进仓库——
+> 任何拿到仓库的人都能用它连库。去掉兜底之后，缺凭据会在**连库之前**就报错，
+> 并告诉你缺哪个环境变量，而不是拿一个错的口令去试。
+> 走 Compose 时密码由 `make docker-env` 随机生成，用
+> `source scripts/export-docker-env.sh` 导入；容器内的元知识 CLI 挂在
+> `init` 服务下跑（见 [`DOCKER-DEPLOY.md`](DOCKER-DEPLOY.md) 3.1 节）。
 
 ### 自定义目标时，S2 和 S3 必须用同一组变量
 

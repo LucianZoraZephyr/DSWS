@@ -23,9 +23,9 @@
 | **S5 安全边界** | ✅ 完成 | `make stage5` |
 | **S6 失败通道** | ✅ 完成 | `make stage6` |
 | **S7 前端收口** | ✅ 完成 | `make stage7` + `make stage7-ui` |
-| S8 性能 | ⬜ 待做 | `make stage8` |
+| S8 性能 | ⬜ 待做 | 路线图定义；Makefile 里还没有 `stage8` 目标 |
 
-当前验收数据：后端 **527 passed / 30 skipped**，前端 **40 passed**，
+当前验收数据：后端 **665 passed / 31 skipped**，前端 **40 passed**，
 SSE 夹具 **14 条**，`tsc --noEmit` 零错误。
 
 ---

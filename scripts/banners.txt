@@ -1,0 +1,46 @@
+# Makefile 的横幅文本。
+#
+# 为什么单独放一个文件：Windows 上 mingw-make 会把配方里的字节按系统 ANSI
+# 代码页（cp936/GBK）解码一次，UTF-8 的中文因此变成乱码，个别情况下还会把
+# 引号一起吃掉，配方直接报 shell 语法错。放在这里，shell 直接读文件，
+# 字节原样输出，不经过 Windows 命令行这一层。
+#
+# 格式：<键>|<横幅正文>。键由 scripts/say.sh 使用，Makefile 里只写 ASCII 的键。
+s0-backend-contract|== S0 · 后端契约测试 ==
+s0-frontend-sse|== S0 · 前端 SSE 协议单测 ==
+s0-frontend-build|== S0 · 前端类型检查 + 构建 ==
+s1-contract-ddl|== S1 · 契约 ↔ DDL/数据 ==
+s1-negative-fixture|== S1 · 负向夹具（必须红） ==
+s1-backend-tests|== S1 · 后端测试（S0 + S1） ==
+s2-dry-run|== S2 · dry-run（不连接存储） ==
+s2-rebuild|== S2 · --fresh 重建 rebuild 目标 ==
+s2-verify|== S2 · --verify 三存储对账 ==
+s2-idempotent|== S2 · 第二次构建必须零写入 ==
+s2-backend-tests|== S2 · 后端测试（S0 + S1 + S2） ==
+s3-verify|== S3 · S2 三存储对账 ==
+s3-golden-set|== S3 · 20 题黄金集（真实 ES/Qdrant/Meta） ==
+s3-cli-yaml|== S3 · CLI 输出 YAML（stdout）与检索统计（stderr） ==
+s3-backend-tests|== S3 · 全部后端测试（S0 + S1 + S2 + S3） ==
+s4-baseline|== S4 · 10 题基线（问题 / SQL / 判定） ==
+s4-generate-tests|== S4 · 生成层测试（提示词契约 / 静态校验 / 基线 / 三方对齐） ==
+s4-backend-tests|== S4 · 全部后端测试（S0 + S1 + S2 + S3 + S4） ==
+s5-policy-gate|== S5 · 安全策略门禁（注入语料 100% 拒绝 + 零误杀） ==
+s5-corpus-table|== S5 · 注入语料判定表 ==
+s5-security-tests|== S5 · 安全层测试（策略 / 语料 / 执行器 / 账号 / 对齐） ==
+s5-backend-tests|== S5 · 全部后端测试（S0 + S1 + S2 + S3 + S4 + S5） ==
+s5-provision-ro|== S5 · 开通只读账号 ==
+s5-verify-ro|== S5 · 验证只读账号（真的写不了） ==
+s5-two-screen|== S5 · 两屏对比：旧系统执行 / 新系统拒绝 ==
+s6-failure-gate|== S6 · 失败通道门禁（6 类失败 + 错误码表） ==
+s6-error-table|== S6 · 错误码表 ==
+s6-scenario-table|== S6 · 失败场景表 ==
+s6-failure-tests|== S6 · 失败通道测试（错误码表 / 校正闭环 / 编排 / API / 场景） ==
+s6-frontend-sse|== S6 · 前端协议单测 ==
+s6-frontend-build|== S6 · 前端类型检查 + 构建 ==
+s6-backend-tests|== S6 · 全部后端测试（S0 + S1 + S2 + S3 + S4 + S5 + S6） ==
+s7-contract-freshness|== S7 · 契约生成物新鲜度 ==
+s7-sse-fixture|== S7 · SSE 夹具与真实输出一致 ==
+s7-frontend-contract|== S7 · 前端契约测试 ==
+s7-frontend-sse|== S7 · 前端协议单测 ==
+s7-frontend-build|== S7 · 前端类型检查 + 构建 ==
+s7-backend-tests|== S7 · 全部后端测试（S0 … S7） ==

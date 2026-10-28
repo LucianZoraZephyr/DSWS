@@ -23,6 +23,7 @@ from pymysql.cursors import DictCursor
 
 from app.build.config import BuildConfig
 from app.build.embedding import EmbeddingProvider, make_embedding_provider
+from app.build.errors import BuildError
 from app.recall.catalog import Catalog, default_catalog
 from app.recall.errors import RecallError
 
@@ -60,7 +61,13 @@ class MetaReader:
         self.roundtrips = 0
 
     def _connect(self) -> pymysql.connections.Connection:
-        params = self.config.mysql_dsn(database=self.config.meta_db)
+        try:
+            params = self.config.mysql_dsn(database=self.config.meta_db)
+        except BuildError as exc:
+            # 凭据没配好是部署问题，不是检索问题——但对调用方来说
+            # 一样是"这个依赖不可用"，所以翻译成 RecallError，
+            # 让 ping() 还能如实报告 mysql=False。
+            raise RecallError(str(exc)) from exc
         params["cursorclass"] = DictCursor
         try:
             return pymysql.connect(**params)

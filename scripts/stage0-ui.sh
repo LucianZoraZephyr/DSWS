@@ -12,7 +12,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_PORT="${API_PORT:-8101}"
 WEB_PORT="${WEB_PORT:-5274}"
-LOG_DIR="$(mktemp -d /tmp/opencode/rebuild-s0-ui.XXXXXX)"
+LOG_ROOT="${TMPDIR:-/tmp}"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/rebuild-s0-ui.XXXXXX")"
 
 cleanup() {
   for pidfile in "$LOG_DIR/api.pid" "$LOG_DIR/web.pid"; do
@@ -27,16 +29,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== 启动临时后端 :$API_PORT =="
-setsid bash -c "echo \$\$ > '$LOG_DIR/api.pid'; cd '$ROOT/backend' && exec uv run uvicorn app.main:app --host 127.0.0.1 --port $API_PORT" \
-  >"$LOG_DIR/api.log" 2>&1 &
-API_PID=$!
+# 在后台起一个进程，并把它的 pid 记下来。
+# setsid 在 Linux 上有、Windows 的 git-bash 里没有；没有时退化成普通后台
+# 进程，清理时按 pid 杀。
+start_bg() {
+  local pidfile="$1" logfile="$2" workdir="$3" command="$4"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "echo \$\$ > '$pidfile'; cd '$workdir' && exec $command" \
+      >"$logfile" 2>&1 &
+  else
+    bash -c "echo \$\$ > '$pidfile'; cd '$workdir' && exec $command" \
+      >"$logfile" 2>&1 &
+  fi
+}
 
-for _ in $(seq 1 60); do
+echo "== 启动临时后端 :$API_PORT =="
+start_bg "$LOG_DIR/api.pid" "$LOG_DIR/api.log" "$ROOT/backend" \
+  "uv run uvicorn app.main:app --host 127.0.0.1 --port $API_PORT"
+
+# 不用 $(seq 1 60)：seq 在 macOS/BSD 上不存在（那边是 jot），命令替换展开
+# 成空串，循环体一次都不执行，脚本会立刻带着"后端启动失败"失败——比真正
+# 的原因更难查。
+attempt=1
+while [ "$attempt" -le 60 ]; do
   if curl -sf "http://127.0.0.1:$API_PORT/api/health" >/dev/null; then
     break
   fi
   sleep 0.5
+  attempt=$((attempt + 1))
 done
 
 if ! curl -sf "http://127.0.0.1:$API_PORT/api/health" >/dev/null; then
@@ -46,15 +66,16 @@ if ! curl -sf "http://127.0.0.1:$API_PORT/api/health" >/dev/null; then
 fi
 
 echo "== 启动临时前端 :$WEB_PORT =="
-setsid bash -c "echo \$\$ > '$LOG_DIR/web.pid'; cd '$ROOT/frontend' && VITE_DEV_PROXY_TARGET=http://127.0.0.1:$API_PORT exec npm run dev -- --port $WEB_PORT --strictPort" \
-  >"$LOG_DIR/web.log" 2>&1 &
-WEB_PID=$!
+start_bg "$LOG_DIR/web.pid" "$LOG_DIR/web.log" "$ROOT/frontend" \
+  "VITE_DEV_PROXY_TARGET=http://127.0.0.1:$API_PORT exec npm run dev -- --port $WEB_PORT --strictPort"
 
-for _ in $(seq 1 80); do
+attempt=1
+while [ "$attempt" -le 80 ]; do
   if curl -sf "http://127.0.0.1:$WEB_PORT/" >/dev/null; then
     break
   fi
   sleep 0.5
+  attempt=$((attempt + 1))
 done
 
 if ! curl -sf "http://127.0.0.1:$WEB_PORT/" >/dev/null; then

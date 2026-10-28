@@ -1,0 +1,27 @@
+# 换行符：仓库里放 shell 脚本，就不能让它随每个人的本地配置变。
+#
+# Windows 上 Git 的 `core.autocrlf=true`（默认值）会把 LF 检出成 CRLF。
+# bash 读到 CR 不是「慢一点」，是直接炸：
+#   scripts/stage0-ui.sh: line 3: $'\r': command not found
+# shebang 后面那个 CR 还会让 Linux 内核报 bad interpreter。
+#
+# 所以这里显式钉死：文本文件一律 LF，二进制文件不做任何转换。
+# 本地编辑器如果改成 CRLF，git 在提交时会自动归一化，不会出现假 diff。
+* text=auto eol=lf
+
+# 明确声明二进制，避免 text=auto 猜错。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+
+# 这些是要被 bash / make 直接读的文件，再钉一次（不依赖 * 的兜底）。
+*.sh text eol=lf
+Makefile text eol=lf
+*.Dockerfile text eol=lf
+docker/*.conf text eol=lf

@@ -95,6 +95,22 @@ def _privileged_password() -> str:
     return password
 
 
+def _app_password() -> str:
+    """应用账号的密码。
+
+    和 `_ro_password()` / `_privileged_password()` 同一个约定：密码只由环境
+    变量提供，缺了就地停下并点名变量——不要拿着空密码去撞一次库，那只会
+    换来一句看不出所以然的 ``Access denied``。
+    """
+    password = os.getenv("REBUILD_MYSQL_PASSWORD", "")
+    if not password:
+        raise SystemExit(
+            "缺少环境变量 REBUILD_MYSQL_PASSWORD：应用账号的密码不在仓库里，"
+            "必须由部署环境提供"
+        )
+    return password
+
+
 # ---------------------------------------------------------------------------
 # 离线门禁
 # ---------------------------------------------------------------------------
@@ -272,13 +288,20 @@ def _execute(sql: str) -> int:
     executor = ReadOnlyExecutor(password=_ro_password())
     result = executor.execute(sql)
     if not result.ok:
-        assert result.error is not None
+        error = result.error
+        if error is None:
+            # 结果说"不 ok"却没带错误信息：这是结果本身出了毛病，如实说。
+            # 这里原来是一句 assert——它只给类型检查看，运行时什么都不保证，
+            # 而且 python -O 会把它剥掉，于是同一件事变成一句
+            # AttributeError 的 traceback：调用方看到的是崩溃，不是"被拒绝"。
+            print("拒绝：结果里没有错误信息", file=sys.stderr)
+            return 1
         print(
-            f"拒绝：{result.error.code}"
-            f"（原因码 {result.error.reason_code}）",
+            f"拒绝：{error.code}"
+            f"（原因码 {error.reason_code}）",
             file=sys.stderr,
         )
-        print(f"  {result.error.message}", file=sys.stderr)
+        print(f"  {error.message}", file=sys.stderr)
         return 1
     print(f"SQL：{result.sql}")
     print(f"行数：{len(result.rows)}  耗时：{result.elapsed_ms} ms")
@@ -291,7 +314,7 @@ def _demo() -> int:
     """两屏对比：旧系统执行、新系统拒绝。"""
     connection = _connect(
         user=os.getenv("REBUILD_MYSQL_USER", "didilili"),
-        password=os.getenv("REBUILD_MYSQL_PASSWORD", ""),
+        password=_app_password(),
         database=load_policy_config().account_database,
         multi_statements=True,
     )

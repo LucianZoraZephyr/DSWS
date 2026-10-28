@@ -149,13 +149,38 @@ class MetaStore:
             conn.close()
 
     def ensure_database(self) -> None:
-        """幂等建库；需要 root（或等价权限）来 CREATE/GRANT。"""
+        """幂等建库；需要 root（或等价权限）来 CREATE/GRANT。
+
+        库已经存在的时候 root 是多余的——容器化之后这是常态：init 容器
+        建一次库，之后每次 `docker compose up` 都不该再要 root 密码。
+        所以拿不到 root（密码没配、或者连不上）时先看库在不在：
+        在就返回，不在才报错。
+
+        注意 `mysql_dsn(root=True)` 缺密码时抛的是 `BuildError` 而不是
+        `pymysql.MySQLError`——不接住它，这条降级路径就永远走不到。
+
+        同理，`database_exists()` 里也会抛 `BuildError`（应用密码缺失）。
+        它同样不能从 except 块里穿出去：那会把下面那条合并消息顶掉，
+        用户只看到"缺 REBUILD_MYSQL_PASSWORD"，看不到 root 那条，
+        于是以为只差一个变量——其实两个都没配。
+        """
         db = _safe_ident(self.config.meta_db)
         user = self.config.mysql_user.replace("'", "''")
         try:
             conn = self._connect(root=True)
-        except pymysql.MySQLError as root_exc:
-            if self.database_exists():
+        except (pymysql.MySQLError, BuildError) as root_exc:
+            try:
+                exists = self.database_exists()
+            except (pymysql.MySQLError, BuildError) as probe_exc:
+                raise BuildError(
+                    "无法以 root 创建 rebuild 元数据库，且无法确认库是否存在。\n"
+                    "请设置 REBUILD_MYSQL_ROOT_USER / REBUILD_MYSQL_ROOT_PASSWORD"
+                    "（建库、开通只读账号需要 root 权限），"
+                    "以及 REBUILD_MYSQL_PASSWORD（Meta MySQL 的应用账号）。\n"
+                    f"root 连接错误：{root_exc}\n"
+                    f"探测库是否存在时出错：{probe_exc}"
+                ) from root_exc
+            if exists:
                 return
             raise BuildError(
                 "无法以 root 创建 rebuild 元数据库，且库不存在。\n"

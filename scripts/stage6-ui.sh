@@ -50,12 +50,15 @@ start_bg() {
 }
 
 wait_for() {
-  local url="$1" tries="$2"
-  for _ in $(seq 1 "$tries"); do
+  local url="$1" tries="$2" attempt=1
+  # 不用 $(seq 1 "$tries")：seq 在 macOS/BSD 上不存在（那边是 jot），
+  # 命令替换展开成空串，循环体一次都不执行。
+  while [ "$attempt" -le "$tries" ]; do
     if curl -sf "$url" >/dev/null; then
       return 0
     fi
     sleep 0.5
+    attempt=$((attempt + 1))
   done
   return 1
 }

@@ -1,5 +1,29 @@
 # Docker 容器化部署 Implementation Plan
 
+> ⚠️ **这份计划已经实施完毕，是历史记录，不是当前实现的说明。**
+>
+> 实际落地的文件以仓库里的为准：`compose.yaml`、`docker/backend.Dockerfile`、
+> `docker/frontend.Dockerfile`、`docker/nginx.conf`、
+> `backend/app/scripts/docker_init.py`、`scripts/docker-smoke.sh`、
+> `scripts/generate_docker_env.py`、`scripts/export-docker-env.sh`。
+> 面向使用者的说明在 [`docs/DOCKER-DEPLOY.md`](../../DOCKER-DEPLOY.md)。
+>
+> 实施过程中与本计划不一致的地方（**以实现为准**）：
+>
+> - backend 镜像的 `WORKDIR` 是 `/app/backend`（计划里写的是 `/build`）；
+> - `compose.yaml` 多了 qdrant 的 healthcheck（镜像里没有 curl / wget，
+>   用 `bash` 的 `/dev/tcp` 打 `/readyz`），ES 的 healthcheck 改成断言
+>   JSON 里的 `status` 字段；
+> - `scripts/docker-smoke.sh` 重写过：SSE 检查改用裸 socket 看 HTTP 分片的
+>   **到达时刻**（分片个数不能当判据——被代理攒起来一次性发出的响应也会被
+>   拆成好几个分片，"分片 ≥ 2"照样过）；整个响应快到 200 ms 内就结束时判为
+>   "分辨不出是否流式"，不据此判失败，重试 3 次；并且失败时会把 `init` 的
+>   日志打出来；
+> - `.env.example` / `compose.yaml` 多了 `FRONTEND_BIND`；
+> - 仓库根多了 `.gitattributes`（Windows 上 bash 脚本不能带 CRLF）；
+> - `backend/app/build/config.py` 去掉了硬编码的密码兜底值——
+>   缺凭据要显式报错，而不是拿一个写进仓库的口令去连库。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把前端、后端、MySQL、Elasticsearch、Qdrant 和一次性初始化任务打包进单机 Docker Compose，一条命令完成部署、导入 `fixtures/dw.sql`、创建 `dw_reader` 并构建 S2 元知识。
@@ -1504,7 +1528,7 @@ docker compose up -d mysql elasticsearch qdrant
 - Qdrant 没有 healthcheck，`init` 会自己轮询 `/collections`。
 ```
 
-4. Replace `docker compose exec mysql mysqladmin ping -h 127.0.0.1 -uroot -pdili123`
+4. Replace `docker compose exec mysql mysqladmin ping -h 127.0.0.1 -uroot -p<旧口令>`
 with:
 
 ```bash

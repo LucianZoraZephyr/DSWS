@@ -253,6 +253,18 @@ def test_manifest_counts_roundtrip(plan) -> None:
 
 def test_config_repr_hides_passwords(config) -> None:
     text = config.safe_repr()
-    assert "dili123" not in text
     assert config.meta_db.endswith("_rebuild")
     assert config.es_index.endswith("_rebuild")
+
+
+def test_config_repr_hides_the_actual_password(monkeypatch) -> None:
+    """`safe_repr()` 里不许出现真实口令。
+
+    盯的是**这个配置里正在用的那个口令**，不是某个写死的字符串——
+    换了口令，这条测试照样拦得住。
+    """
+    monkeypatch.setenv("REBUILD_MYSQL_PASSWORD", "a-very-secret-value")
+    monkeypatch.setenv("REBUILD_MYSQL_ROOT_PASSWORD", "another-secret-value")
+    text = BuildConfig.from_env().safe_repr()
+    assert "a-very-secret-value" not in text
+    assert "another-secret-value" not in text
