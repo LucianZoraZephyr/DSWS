@@ -681,7 +681,7 @@ make stage7
 3. **前端契约测试**：`pytest -q tests/frontend`（45 条：生成器 / 夹具 / 类型保真）。
 4. **前端协议单测 + 构建**：`npm run test`（40 条）+ `npm run build`
    （即 `tsc --noEmit` 零错误 + Vite 构建）。
-5. **全量后端测试**：665 passed / 31 skipped（S0–S7 + Docker init 测试
+5. **全量后端测试**：782 passed / 31 skipped（S0–S7 + Docker init 测试
    + Docker 化复查修复新增）。
 
 生成物**不要手改**。改了契约就重新生成：

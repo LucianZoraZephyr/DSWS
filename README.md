@@ -25,7 +25,7 @@
 | **S7 前端收口** | ✅ 完成 | `make stage7` + `make stage7-ui` |
 | S8 性能 | ⬜ 待做 | 路线图定义；Makefile 里还没有 `stage8` 目标 |
 
-当前验收数据：后端 **665 passed / 31 skipped**，前端 **40 passed**，
+当前验收数据：后端 **782 passed / 31 skipped**，前端 **40 passed**，
 SSE 夹具 **14 条**，`tsc --noEmit` 零错误。
 
 ---
